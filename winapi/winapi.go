@@ -93,7 +93,7 @@ func DisableCloseButton(title string) {
 	}
 }
 
-// HideTitleBar hides the title bar of the window with the specified title.
+// . Hide title bar
 func HideTitleBar(title string) {
 	user32 := syscall.MustLoadDLL("user32.dll")
 	findWindow := user32.MustFindProc("FindWindowW")
@@ -125,7 +125,7 @@ func HideTitleBar(title string) {
 	}
 }
 
-// MoveWindow moves the window with the specified title to the specified position and size.
+// . Move window
 func MoveWindow(title string, x, y, width, height int32) {
 	user32 := syscall.MustLoadDLL("user32.dll")
 	getWindowHandleByName := user32.MustFindProc("FindWindowW")
@@ -149,7 +149,6 @@ func MoveWindow(title string, x, y, width, height int32) {
 	}
 }
 
-// GetTaskbarHeight returns the height of the taskbar.
 func GetTaskbarHeight() int {
 	user32 := windows.MustLoadDLL("user32.dll")
 	getSystemMetrics := user32.MustFindProc("GetSystemMetrics")
@@ -169,4 +168,151 @@ func GetTaskbarHeight() int {
 	taskbarHeight := screenHeight - workAreaHeight
 
 	return int(taskbarHeight)
+}
+
+// . Hide from taskbar
+const (
+	WS_EX_TOOLWINDOW = 0x00000080
+	WS_EX_APPWINDOW  = 0x00040000
+)
+
+func HideWindowFromTaskbar(title string) {
+	user32 := syscall.MustLoadDLL("user32.dll")
+	findWindow := user32.MustFindProc("FindWindowW")
+	getWindowLong := user32.MustFindProc("GetWindowLongW")
+	setWindowLong := user32.MustFindProc("SetWindowLongW")
+
+	ptr, err := syscall.UTF16PtrFromString(title)
+	if err != nil {
+		fmt.Printf("Failed to convert string to UTF16: %v\n", err)
+		return
+	}
+
+	hwnd, _, err := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
+	if hwnd == 0 {
+		fmt.Printf("Failed to get window handle: %v\n", err)
+		return
+	}
+
+	// Use int32 for GWL_EXSTYLE
+	gwl_exstyle := int32(-20)
+	exStyle, _, err := getWindowLong.Call(hwnd, uintptr(gwl_exstyle))
+	if exStyle == 0 {
+		fmt.Printf("Failed to get window style: %v\n", err)
+		return
+	}
+
+	newExStyle := (exStyle | uintptr(WS_EX_TOOLWINDOW)) &^ uintptr(WS_EX_APPWINDOW)
+	result, _, err := setWindowLong.Call(hwnd, uintptr(gwl_exstyle), newExStyle)
+	if result == 0 {
+		fmt.Printf("Failed to set window style: %v\n", err)
+	}
+}
+
+// . Show / Hide window
+const (
+	SW_HIDE = 0
+	SW_SHOW = 5
+)
+
+func ShowWindow(title string) {
+	user32 := syscall.MustLoadDLL("user32.dll")
+	findWindow := user32.MustFindProc("FindWindowW")
+	showWindow := user32.MustFindProc("ShowWindow")
+
+	ptr, err := syscall.UTF16PtrFromString(title)
+	if err != nil {
+		fmt.Printf("Failed to convert string to UTF16: %v\n", err)
+		return
+	}
+
+	hwnd, _, err := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
+	if hwnd == 0 {
+		fmt.Printf("Failed to get window handle: %v\n", err)
+		return
+	}
+
+	_, _, err = showWindow.Call(hwnd, uintptr(SW_SHOW))
+	if err != nil {
+		fmt.Printf("Failed to show window: %v\n", err)
+	}
+}
+
+func HideWindow(title string) {
+	user32 := syscall.MustLoadDLL("user32.dll")
+	findWindow := user32.MustFindProc("FindWindowW")
+	showWindow := user32.MustFindProc("ShowWindow")
+
+	ptr, err := syscall.UTF16PtrFromString(title)
+	if err != nil {
+		fmt.Printf("Failed to convert string to UTF16: %v\n", err)
+		return
+	}
+
+	hwnd, _, err := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
+	if hwnd == 0 {
+		fmt.Printf("Failed to get window handle: %v\n", err)
+		return
+	}
+
+	_, _, err = showWindow.Call(hwnd, uintptr(SW_HIDE))
+	if err != nil {
+		fmt.Printf("Failed to hide window: %v\n", err)
+	}
+}
+
+// . Topmost
+const (
+	SWP_NOSIZE = uintptr(0x0001)
+	SWP_NOMOVE = uintptr(0x0002)
+)
+
+func IntToUintptr(value int) uintptr {
+	return uintptr(value)
+}
+
+func SetWindowAlwaysOnTop(title string) error {
+	user32dll := windows.MustLoadDLL("user32.dll")
+	findWindow := user32dll.MustFindProc("FindWindowW")
+	setwindowpos := user32dll.MustFindProc("SetWindowPos")
+
+	ptr, err := syscall.UTF16PtrFromString(title)
+	if err != nil {
+		return err
+	}
+
+	hwnd, _, err := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
+	if hwnd == 0 {
+		return fmt.Errorf("Failed to get window handle: %v", err)
+	}
+
+	_, _, err = setwindowpos.Call(hwnd, IntToUintptr(-1), 0, 0, 0, 0, SWP_NOSIZE|SWP_NOMOVE)
+	if err != nil && err != syscall.Errno(0) {
+		return err
+	}
+
+	return nil
+}
+
+func RemoveWindowAlwaysOnTop(title string) error {
+	user32dll := windows.MustLoadDLL("user32.dll")
+	findWindow := user32dll.MustFindProc("FindWindowW")
+	setwindowpos := user32dll.MustFindProc("SetWindowPos")
+
+	ptr, err := syscall.UTF16PtrFromString(title)
+	if err != nil {
+		return err
+	}
+
+	hwnd, _, err := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
+	if hwnd == 0 {
+		return fmt.Errorf("Failed to get window handle: %v", err)
+	}
+
+	_, _, err = setwindowpos.Call(hwnd, IntToUintptr(-2), 0, 0, 0, 0, SWP_NOSIZE|SWP_NOMOVE)
+	if err != nil && err != syscall.Errno(0) {
+		return err
+	}
+
+	return nil
 }
