@@ -8,19 +8,21 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// Constants
 const (
-	WS_MINIMIZEBOX  = 0x00020000
-	WS_CAPTION      = 0x00C00000
-	MF_BYCOMMAND    = 0x00000000
-	SC_CLOSE        = 0xF060
-	MF_GRAYED       = 0x00000001
-	SM_CYSCREEN     = 1
-	SPI_GETWORKAREA = 48
-)
-
-var (
-	GWL_STYLE int32 = -16
+	WS_MINIMIZEBOX   = 0x00020000
+	WS_CAPTION       = 0x00C00000
+	MF_BYCOMMAND     = 0x00000000
+	SC_CLOSE         = 0xF060
+	MF_GRAYED        = 0x00000001
+	SM_CYSCREEN      = 1
+	SPI_GETWORKAREA  = 48
+	GWL_STYLE        = -16
+	WS_EX_TOOLWINDOW = 0x00000080
+	WS_EX_APPWINDOW  = 0x00040000
+	SW_HIDE          = 0
+	SW_SHOW          = 5
+	SWP_NOSIZE       = 0x0001
+	SWP_NOMOVE       = 0x0002
 )
 
 type RECT struct {
@@ -30,7 +32,12 @@ type RECT struct {
 	Bottom int32
 }
 
-// DisableMinMaxButtons disables the minimize button of the window with the specified title.
+// . Convert int to uintptr due to inline conversion being impossible with negative numbers
+func IntToUintptr(value int) uintptr {
+	return uintptr(value)
+}
+
+// . Disables the minimize and maximize buttons
 func DisableMinMaxButtons(title string) {
 	user32 := syscall.MustLoadDLL("user32.dll")
 	findWindow := user32.MustFindProc("FindWindowW")
@@ -49,20 +56,20 @@ func DisableMinMaxButtons(title string) {
 		return
 	}
 
-	style, _, err := getWindowLong.Call(hwnd, uintptr(GWL_STYLE))
+	style, _, err := getWindowLong.Call(hwnd, IntToUintptr(GWL_STYLE))
 	if style == 0 {
 		fmt.Printf("Failed to get window style: %v\n", err)
 		return
 	}
 
 	newStyle := style &^ uintptr(WS_MINIMIZEBOX)
-	result, _, err := setWindowLong.Call(hwnd, uintptr(GWL_STYLE), newStyle)
+	result, _, err := setWindowLong.Call(hwnd, IntToUintptr(GWL_STYLE), newStyle)
 	if result == 0 {
 		fmt.Printf("Failed to set window style: %v\n", err)
 	}
 }
 
-// DisableCloseButton disables the close button of the window with the specified title.
+// . Disables the close button
 func DisableCloseButton(title string) {
 	user32 := syscall.MustLoadDLL("user32.dll")
 	findWindow := user32.MustFindProc("FindWindowW")
@@ -112,14 +119,14 @@ func HideTitleBar(title string) {
 		return
 	}
 
-	style, _, err := getWindowLong.Call(hwnd, uintptr(GWL_STYLE))
+	style, _, err := getWindowLong.Call(hwnd, IntToUintptr(GWL_STYLE))
 	if style == 0 {
 		fmt.Printf("Failed to get window style: %v\n", err)
 		return
 	}
 
 	newStyle := style &^ uintptr(WS_CAPTION)
-	result, _, err := setWindowLong.Call(hwnd, uintptr(GWL_STYLE), newStyle)
+	result, _, err := setWindowLong.Call(hwnd, IntToUintptr(GWL_STYLE), newStyle)
 	if result == 0 {
 		fmt.Printf("Failed to set window style: %v\n", err)
 	}
@@ -171,11 +178,6 @@ func GetTaskbarHeight() int {
 }
 
 // . Hide from taskbar
-const (
-	WS_EX_TOOLWINDOW = 0x00000080
-	WS_EX_APPWINDOW  = 0x00040000
-)
-
 func HideWindowFromTaskbar(title string) {
 	user32 := syscall.MustLoadDLL("user32.dll")
 	findWindow := user32.MustFindProc("FindWindowW")
@@ -210,11 +212,6 @@ func HideWindowFromTaskbar(title string) {
 }
 
 // . Show / Hide window
-const (
-	SW_HIDE = 0
-	SW_SHOW = 5
-)
-
 func ShowWindow(title string) {
 	user32 := syscall.MustLoadDLL("user32.dll")
 	findWindow := user32.MustFindProc("FindWindowW")
@@ -262,15 +259,6 @@ func HideWindow(title string) {
 }
 
 // . Topmost
-const (
-	SWP_NOSIZE = uintptr(0x0001)
-	SWP_NOMOVE = uintptr(0x0002)
-)
-
-func IntToUintptr(value int) uintptr {
-	return uintptr(value)
-}
-
 func SetWindowAlwaysOnTop(title string) error {
 	user32dll := windows.MustLoadDLL("user32.dll")
 	findWindow := user32dll.MustFindProc("FindWindowW")
