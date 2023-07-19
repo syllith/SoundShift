@@ -50,6 +50,7 @@ func SetDefaultEndPoint(deviceId string) {
 
 	var pcv *IPolicyConfig
 	if err := wca.CoCreateInstance(CPolicyConfigClientUID, 0, wca.CLSCTX_ALL, IPolicyConfigUID, &pcv); err != nil {
+
 		return
 	}
 	defer pcv.Release()

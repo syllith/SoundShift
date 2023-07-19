@@ -9,8 +9,9 @@ import (
 
 // Audio device struct
 type AudioDevice struct {
-	Name string
-	Id   string
+	Name      string
+	Id        string
+	IsDefault bool
 }
 
 func GetDevices() []AudioDevice {
@@ -25,6 +26,16 @@ func GetDevices() []AudioDevice {
 		return nil
 	}
 	defer mmde.Release()
+
+	var defaultDevice *wca.IMMDevice
+	if err := mmde.GetDefaultAudioEndpoint(wca.ERender, wca.EConsole, &defaultDevice); err != nil {
+		fmt.Println(err)
+		return nil
+	}
+	defer defaultDevice.Release()
+
+	var defaultId string
+	defaultDevice.GetId(&defaultId)
 
 	var mmdc *wca.IMMDeviceCollection
 	mmde.EnumAudioEndpoints(wca.ERender, wca.DEVICE_STATE_ACTIVE, &mmdc)
@@ -47,7 +58,9 @@ func GetDevices() []AudioDevice {
 		var name wca.PROPVARIANT
 		propStore.GetValue(&wca.PKEY_Device_FriendlyName, &name)
 
-		audioDevices[i] = AudioDevice{Name: name.String(), Id: id}
+		isDefault := id == defaultId
+
+		audioDevices[i] = AudioDevice{Name: name.String(), Id: id, IsDefault: isDefault}
 	}
 
 	return audioDevices
