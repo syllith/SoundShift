@@ -37,6 +37,26 @@ func IntToUintptr(value int) uintptr {
 	return uintptr(value)
 }
 
+// . Check for window handle
+func WindowExists(title string) bool {
+	user32 := syscall.MustLoadDLL("user32.dll")
+	findWindow := user32.MustFindProc("FindWindowW")
+
+	ptr, err := syscall.UTF16PtrFromString(title)
+	if err != nil {
+		fmt.Printf("Failed to convert string to UTF16: %v\n", err)
+		return false
+	}
+
+	hwnd, _, err := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
+	if hwnd == 0 {
+		fmt.Printf("Failed to get window handle: %v\n", err)
+		return false
+	}
+
+	return true
+}
+
 // . Disables the minimize and maximize buttons
 func DisableMinMaxButtons(title string) {
 	user32 := syscall.MustLoadDLL("user32.dll")
@@ -135,7 +155,7 @@ func HideTitleBar(title string) {
 // . Move window
 func MoveWindow(title string, x, y, width, height int32) {
 	user32 := syscall.MustLoadDLL("user32.dll")
-	getWindowHandleByName := user32.MustFindProc("FindWindowW")
+	findWindow := user32.MustFindProc("FindWindowW")
 	moveWindow := user32.MustFindProc("MoveWindow")
 
 	ptr, err := syscall.UTF16PtrFromString(title)
@@ -144,7 +164,7 @@ func MoveWindow(title string, x, y, width, height int32) {
 		return
 	}
 
-	hwnd, _, err := getWindowHandleByName.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
+	hwnd, _, err := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
 	if hwnd == 0 {
 		fmt.Printf("Failed to get window handle: %s\n", err)
 		return

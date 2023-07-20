@@ -107,7 +107,7 @@ var Win fyne.Window = App.NewWindow(title)
 var configWin fyne.Window = App.NewWindow("Configure")
 var vbox = container.NewVBox()
 var mainView = container.NewCenter(container.NewPadded(vbox))
-var visible = true
+var visible = false
 var configWindowOpen = false
 
 var configureButton *widget.Button
@@ -126,35 +126,54 @@ func main() {
 	Win.Resize(fyne.NewSize(250, 300))
 	Win.SetFixedSize(true)
 	App.Settings().SetTheme(fyneTheme.CustomTheme{})
-	go systray.Run(initTray, func() {})
-	go func() {
-		for {
-			time.Sleep(250 * time.Millisecond)
-			winapi.DisableMinMaxButtons(title)
-			winapi.DisableCloseButton(title)
-			winapi.HideWindowFromTaskbar(title)
-			winapi.SetWindowAlwaysOnTop(title)
+	Win.SetCloseIntercept(func() {
+		winapi.HideWindow(title)
+		visible = false
+	})
 
-			size := Win.Canvas().Size()
-			winapi.MoveWindow(title, int32(screenWidth-int(size.Width)-20), int32(screenHeight-int(size.Height)-45-taskbarHeight), int32(size.Width), int32(size.Height))
-		}
-	}()
+	go systray.Run(initTray, func() {})
 
 	loadSettings()
 	renderButtons()
+
 	ticker := time.NewTicker(5 * time.Second)
 	go func() {
 		for range ticker.C {
 			renderButtons()
 		}
 	}()
+
+	// go func() {
+	// 	for !winapi.WindowExists(title) {
+	// 		time.Sleep(100 * time.Millisecond)
+	// 	}
+	// 	time.Sleep(500 * time.Millisecond)
+	// 	winapi.HideWindow(title)
+	// 	winapi.DisableMinMaxButtons(title)
+	// 	winapi.HideWindowFromTaskbar(title)
+	// 	winapi.SetWindowAlwaysOnTop(title)
+
+	// 	size := Win.Canvas().Size()
+	// 	winapi.MoveWindow(title, int32(screenWidth-int(size.Width)-20), int32(screenHeight-int(size.Height)-45-taskbarHeight), int32(size.Width), int32(size.Height))
+	// }()
+
+	App.Lifecycle().SetOnEnteredForeground(func() {
+		winapi.HideWindow(title)
+		winapi.DisableMinMaxButtons(title)
+		winapi.HideWindowFromTaskbar(title)
+		winapi.SetWindowAlwaysOnTop(title)
+
+		size := Win.Canvas().Size()
+		winapi.MoveWindow(title, int32(screenWidth-int(size.Width)-20), int32(screenHeight-int(size.Height)-45-taskbarHeight), int32(size.Width), int32(size.Height))
+	})
+
 	Win.ShowAndRun()
 }
 
 func renderButtons() {
 	audioDevices := mmDeviceEnumerator.GetDevices()
 
-	// Create audio device buttons
+	//* Create audio device buttons
 	vbox.Objects = nil
 	for i := 0; i < len(audioDevices); i++ {
 		index := i
@@ -202,12 +221,11 @@ func renderButtons() {
 				},
 			})
 		}
-
 	}
 
 	//* Create spacer
 	vbox.Add(&widget.Label{
-		Text: "                                       ",
+		Text: "",
 	})
 
 	//* Create configure button
@@ -321,9 +339,8 @@ func genConfigForm() fyne.CanvasObject {
 		newNameEntry.SetText(config.Name)
 		showHideCheckbox.SetChecked(config.IsShown)
 
-		// Add an action button to newNameEntry
 		newNameEntry.ActionItem = NewColorButton("", color.RGBA{68, 72, 81, 255}, theme.MediaReplayIcon(), func() {
-			newNameEntry.SetText(deviceName) // reset name
+			newNameEntry.SetText(deviceName)
 		})
 
 		form.Append(deviceName, newNameEntry)
@@ -361,7 +378,6 @@ func genConfigForm() fyne.CanvasObject {
 
 		saveSettings()
 		renderButtons()
-		configWin.Close()
 	})
 
 	saveButtonContainer := container.New(layout.NewCenterLayout(), saveButton)
