@@ -202,6 +202,7 @@ func renderButtons() {
 				renderButtons()
 				if settings.HideAfterSelection {
 					winapi.HideWindow(title)
+					visible = false
 				}
 			}))
 		} else {
@@ -217,6 +218,7 @@ func renderButtons() {
 					renderButtons()
 					if settings.HideAfterSelection {
 						winapi.HideWindow(title)
+						visible = false
 					}
 				},
 			})
@@ -256,15 +258,6 @@ func renderButtons() {
 	}
 
 	vbox.Add(configureButton)
-
-	//* Create hide button
-	vbox.Add(&widget.Button{
-		Text: "Hide",
-		OnTapped: func() {
-			winapi.HideWindow(title)
-			visible = false
-		},
-	})
 
 	mainView.Refresh()
 }
