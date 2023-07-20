@@ -156,6 +156,7 @@ func MoveWindow(title string, x, y, width, height int32) {
 	}
 }
 
+// . Get title bar height
 func GetTaskbarHeight() int {
 	user32 := windows.MustLoadDLL("user32.dll")
 	getSystemMetrics := user32.MustFindProc("GetSystemMetrics")
@@ -211,7 +212,7 @@ func HideWindowFromTaskbar(title string) {
 	}
 }
 
-// . Show / Hide window
+// . Show window
 func ShowWindow(title string) {
 	user32 := syscall.MustLoadDLL("user32.dll")
 	findWindow := user32.MustFindProc("FindWindowW")
@@ -235,6 +236,7 @@ func ShowWindow(title string) {
 	}
 }
 
+// . Hide window
 func HideWindow(title string) {
 	user32 := syscall.MustLoadDLL("user32.dll")
 	findWindow := user32.MustFindProc("FindWindowW")
