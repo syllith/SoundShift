@@ -1,7 +1,6 @@
 package winapi
 
 import (
-	"fmt"
 	"syscall"
 	"unsafe"
 
@@ -37,28 +36,22 @@ func IntToUintptr(value int) uintptr {
 	return uintptr(value)
 }
 
-// . Check for window handle
+// . Checks if the window handle exists with the given title
 func WindowExists(title string) bool {
 	user32 := syscall.MustLoadDLL("user32.dll")
 	findWindow := user32.MustFindProc("FindWindowW")
 
 	ptr, err := syscall.UTF16PtrFromString(title)
 	if err != nil {
-		fmt.Printf("Failed to convert string to UTF16: %v\n", err)
 		return false
 	}
 
-	hwnd, _, err := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
-	if hwnd == 0 {
-		fmt.Printf("Failed to get window handle: %v\n", err)
-		return false
-	}
-
-	return true
+	hwnd, _, _ := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
+	return hwnd != 0
 }
 
-// . Disables the minimize and maximize buttons
-func DisableMinMaxButtons(title string) {
+// . Hides the minimize / maximize buttons in the title bar
+func HideMinMaxButtons(title string) {
 	user32 := syscall.MustLoadDLL("user32.dll")
 	findWindow := user32.MustFindProc("FindWindowW")
 	getWindowLong := user32.MustFindProc("GetWindowLongPtrW")
@@ -66,30 +59,24 @@ func DisableMinMaxButtons(title string) {
 
 	ptr, err := syscall.UTF16PtrFromString(title)
 	if err != nil {
-		fmt.Printf("Failed to convert string to UTF16: %v\n", err)
 		return
 	}
 
-	hwnd, _, err := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
+	hwnd, _, _ := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
 	if hwnd == 0 {
-		fmt.Printf("Failed to get window handle: %v\n", err)
 		return
 	}
 
-	style, _, err := getWindowLong.Call(hwnd, IntToUintptr(GWL_STYLE))
+	style, _, _ := getWindowLong.Call(hwnd, IntToUintptr(GWL_STYLE))
 	if style == 0 {
-		fmt.Printf("Failed to get window style: %v\n", err)
 		return
 	}
 
 	newStyle := style &^ uintptr(WS_MINIMIZEBOX)
-	result, _, err := setWindowLong.Call(hwnd, IntToUintptr(GWL_STYLE), newStyle)
-	if result == 0 {
-		fmt.Printf("Failed to set window style: %v\n", err)
-	}
+	_, _, _ = setWindowLong.Call(hwnd, IntToUintptr(GWL_STYLE), newStyle)
 }
 
-// . Disables the close button
+// . Disables the close button in the title bar
 func DisableCloseButton(title string) {
 	user32 := syscall.MustLoadDLL("user32.dll")
 	findWindow := user32.MustFindProc("FindWindowW")
@@ -98,29 +85,23 @@ func DisableCloseButton(title string) {
 
 	ptr, err := syscall.UTF16PtrFromString(title)
 	if err != nil {
-		fmt.Printf("Failed to convert string to UTF16: %v\n", err)
 		return
 	}
 
-	hwnd, _, err := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
+	hwnd, _, _ := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
 	if hwnd == 0 {
-		fmt.Printf("Failed to get window handle: %v\n", err)
 		return
 	}
 
-	hMenu, _, err := getSystemMenu.Call(hwnd, uintptr(0))
+	hMenu, _, _ := getSystemMenu.Call(hwnd, uintptr(0))
 	if hMenu == 0 {
-		fmt.Printf("Failed to get system menu: %v\n", err)
 		return
 	}
 
-	result, _, err := enableMenuItem.Call(hMenu, uintptr(SC_CLOSE), uintptr(MF_BYCOMMAND|MF_GRAYED))
-	if result == 0xFFFFFFFF {
-		fmt.Printf("Failed to disable close button: %v\n", err)
-	}
+	_, _, _ = enableMenuItem.Call(hMenu, uintptr(SC_CLOSE), uintptr(MF_BYCOMMAND|MF_GRAYED))
 }
 
-// . Hide title bar
+// . Hides the title bar
 func HideTitleBar(title string) {
 	user32 := syscall.MustLoadDLL("user32.dll")
 	findWindow := user32.MustFindProc("FindWindowW")
@@ -129,30 +110,24 @@ func HideTitleBar(title string) {
 
 	ptr, err := syscall.UTF16PtrFromString(title)
 	if err != nil {
-		fmt.Printf("Failed to convert string to UTF16: %v\n", err)
 		return
 	}
 
-	hwnd, _, err := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
+	hwnd, _, _ := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
 	if hwnd == 0 {
-		fmt.Printf("Failed to get window handle: %v\n", err)
 		return
 	}
 
-	style, _, err := getWindowLong.Call(hwnd, IntToUintptr(GWL_STYLE))
+	style, _, _ := getWindowLong.Call(hwnd, IntToUintptr(GWL_STYLE))
 	if style == 0 {
-		fmt.Printf("Failed to get window style: %v\n", err)
 		return
 	}
 
 	newStyle := style &^ uintptr(WS_CAPTION)
-	result, _, err := setWindowLong.Call(hwnd, IntToUintptr(GWL_STYLE), newStyle)
-	if result == 0 {
-		fmt.Printf("Failed to set window style: %v\n", err)
-	}
+	_, _, _ = setWindowLong.Call(hwnd, IntToUintptr(GWL_STYLE), newStyle)
 }
 
-// . Move window
+// . Relocates and resizes the window
 func MoveWindow(title string, x, y, width, height int32) {
 	user32 := syscall.MustLoadDLL("user32.dll")
 	findWindow := user32.MustFindProc("FindWindowW")
@@ -160,23 +135,18 @@ func MoveWindow(title string, x, y, width, height int32) {
 
 	ptr, err := syscall.UTF16PtrFromString(title)
 	if err != nil {
-		fmt.Printf("Failed to convert string to UTF16: %v\n", err)
 		return
 	}
 
-	hwnd, _, err := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
+	hwnd, _, _ := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
 	if hwnd == 0 {
-		fmt.Printf("Failed to get window handle: %s\n", err)
 		return
 	}
 
-	result, _, err := moveWindow.Call(hwnd, uintptr(x), uintptr(y), uintptr(width), uintptr(height), uintptr(1))
-	if result == 0 {
-		fmt.Printf("Failed to move window: %s\n", err)
-	}
+	_, _, _ = moveWindow.Call(hwnd, uintptr(x), uintptr(y), uintptr(width), uintptr(height), uintptr(1))
 }
 
-// . Get title bar height
+// . Returns the taskbars current height
 func GetTaskbarHeight() int {
 	user32 := windows.MustLoadDLL("user32.dll")
 	getSystemMetrics := user32.MustFindProc("GetSystemMetrics")
@@ -198,7 +168,7 @@ func GetTaskbarHeight() int {
 	return int(taskbarHeight)
 }
 
-// . Hide from taskbar
+// . Hides the window from the task bar
 func HideWindowFromTaskbar(title string) {
 	user32 := syscall.MustLoadDLL("user32.dll")
 	findWindow := user32.MustFindProc("FindWindowW")
@@ -207,32 +177,25 @@ func HideWindowFromTaskbar(title string) {
 
 	ptr, err := syscall.UTF16PtrFromString(title)
 	if err != nil {
-		fmt.Printf("Failed to convert string to UTF16: %v\n", err)
 		return
 	}
 
-	hwnd, _, err := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
+	hwnd, _, _ := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
 	if hwnd == 0 {
-		fmt.Printf("Failed to get window handle: %v\n", err)
 		return
 	}
 
-	// Use int32 for GWL_EXSTYLE
 	gwl_exstyle := int32(-20)
-	exStyle, _, err := getWindowLong.Call(hwnd, uintptr(gwl_exstyle))
+	exStyle, _, _ := getWindowLong.Call(hwnd, uintptr(gwl_exstyle))
 	if exStyle == 0 {
-		fmt.Printf("Failed to get window style: %v\n", err)
 		return
 	}
 
 	newExStyle := (exStyle | uintptr(WS_EX_TOOLWINDOW)) &^ uintptr(WS_EX_APPWINDOW)
-	result, _, err := setWindowLong.Call(hwnd, uintptr(gwl_exstyle), newExStyle)
-	if result == 0 {
-		fmt.Printf("Failed to set window style: %v\n", err)
-	}
+	_, _, _ = setWindowLong.Call(hwnd, uintptr(gwl_exstyle), newExStyle)
 }
 
-// . Show window
+// . Shows the window
 func ShowWindow(title string) {
 	user32 := syscall.MustLoadDLL("user32.dll")
 	findWindow := user32.MustFindProc("FindWindowW")
@@ -240,23 +203,18 @@ func ShowWindow(title string) {
 
 	ptr, err := syscall.UTF16PtrFromString(title)
 	if err != nil {
-		fmt.Printf("Failed to convert string to UTF16: %v\n", err)
 		return
 	}
 
-	hwnd, _, err := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
+	hwnd, _, _ := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
 	if hwnd == 0 {
-		fmt.Printf("Failed to get window handle: %v\n", err)
 		return
 	}
 
-	_, _, err = showWindow.Call(hwnd, uintptr(SW_SHOW))
-	if err != nil {
-		fmt.Printf("Failed to show window: %v\n", err)
-	}
+	_, _, _ = showWindow.Call(hwnd, uintptr(SW_SHOW))
 }
 
-// . Hide window
+// . Hides the window
 func HideWindow(title string) {
 	user32 := syscall.MustLoadDLL("user32.dll")
 	findWindow := user32.MustFindProc("FindWindowW")
@@ -264,65 +222,51 @@ func HideWindow(title string) {
 
 	ptr, err := syscall.UTF16PtrFromString(title)
 	if err != nil {
-		fmt.Printf("Failed to convert string to UTF16: %v\n", err)
 		return
 	}
 
-	hwnd, _, err := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
+	hwnd, _, _ := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
 	if hwnd == 0 {
-		fmt.Printf("Failed to get window handle: %v\n", err)
 		return
 	}
 
-	_, _, err = showWindow.Call(hwnd, uintptr(SW_HIDE))
-	if err != nil {
-		fmt.Printf("Failed to hide window: %v\n", err)
-	}
+	_, _, _ = showWindow.Call(hwnd, uintptr(SW_HIDE))
 }
 
-// . Topmost
-func SetWindowAlwaysOnTop(title string) error {
+// . Sets the window to be topmost
+func SetTopmost(title string) {
 	user32dll := windows.MustLoadDLL("user32.dll")
 	findWindow := user32dll.MustFindProc("FindWindowW")
 	setwindowpos := user32dll.MustFindProc("SetWindowPos")
 
 	ptr, err := syscall.UTF16PtrFromString(title)
 	if err != nil {
-		return err
+		return
 	}
 
-	hwnd, _, err := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
+	hwnd, _, _ := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
 	if hwnd == 0 {
-		return fmt.Errorf("Failed to get window handle: %v", err)
+		return
 	}
 
-	_, _, err = setwindowpos.Call(hwnd, IntToUintptr(-1), 0, 0, 0, 0, SWP_NOSIZE|SWP_NOMOVE)
-	if err != nil && err != syscall.Errno(0) {
-		return err
-	}
-
-	return nil
+	_, _, _ = setwindowpos.Call(hwnd, IntToUintptr(-1), 0, 0, 0, 0, SWP_NOSIZE|SWP_NOMOVE)
 }
 
-func RemoveWindowAlwaysOnTop(title string) error {
+// . Removes window topmost
+func RemoveTopmost(title string) {
 	user32dll := windows.MustLoadDLL("user32.dll")
 	findWindow := user32dll.MustFindProc("FindWindowW")
 	setwindowpos := user32dll.MustFindProc("SetWindowPos")
 
 	ptr, err := syscall.UTF16PtrFromString(title)
 	if err != nil {
-		return err
+		return
 	}
 
-	hwnd, _, err := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
+	hwnd, _, _ := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
 	if hwnd == 0 {
-		return fmt.Errorf("Failed to get window handle: %v", err)
+		return
 	}
 
-	_, _, err = setwindowpos.Call(hwnd, IntToUintptr(-2), 0, 0, 0, 0, SWP_NOSIZE|SWP_NOMOVE)
-	if err != nil && err != syscall.Errno(0) {
-		return err
-	}
-
-	return nil
+	_, _, _ = setwindowpos.Call(hwnd, IntToUintptr(-2), 0, 0, 0, 0, SWP_NOSIZE|SWP_NOMOVE)
 }

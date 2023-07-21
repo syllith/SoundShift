@@ -39,6 +39,7 @@ func GetDevices() []AudioDevice {
 
 	var mmdc *wca.IMMDeviceCollection
 	mmde.EnumAudioEndpoints(wca.ERender, wca.DEVICE_STATE_ACTIVE, &mmdc)
+	defer mmdc.Release()
 
 	var count uint32
 	mmdc.GetCount(&count)
@@ -57,10 +58,13 @@ func GetDevices() []AudioDevice {
 
 		var name wca.PROPVARIANT
 		propStore.GetValue(&wca.PKEY_Device_FriendlyName, &name)
+		propStore.Release() // Release the property store after getting the name.
 
 		isDefault := id == defaultId
 
 		audioDevices[i] = AudioDevice{Name: name.String(), Id: id, IsDefault: isDefault}
+
+		device.Release() // Release the device after processing.
 	}
 
 	return audioDevices

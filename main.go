@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"image/color"
 	"os"
+	"reflect"
 	"soundshift/file"
 	"soundshift/fyneTheme"
 	"soundshift/general"
@@ -109,6 +110,7 @@ var vbox = container.NewVBox()
 var mainView = container.NewCenter(container.NewPadded(vbox))
 var visible = false
 var configWindowOpen = false
+var lastDeviceSettings []mmDeviceEnumerator.AudioDevice
 
 var configureButton *widget.Button
 var settings AppSettings
@@ -116,22 +118,40 @@ var settings AppSettings
 var screenWidth = int(win.GetSystemMetrics(win.SM_CXSCREEN))
 var screenHeight = int(win.GetSystemMetrics(win.SM_CYSCREEN))
 var taskbarHeight = winapi.GetTaskbarHeight()
+var initialized = false
 
 func main() {
+	if general.IsProcRunning(title) {
+		os.Exit(0)
+	}
+
 	settings.DeviceNames = make(map[string]DeviceConfig)
+
+	go systray.Run(initTray, func() {})
 
 	Win.SetContent(mainView)
 	Win.SetTitle(title)
 	Win.SetIcon(fyne.NewStaticResource("icon", icon))
+	configWin.SetIcon(fyne.NewStaticResource("icon", icon))
 	Win.Resize(fyne.NewSize(250, 300))
 	Win.SetFixedSize(true)
-	App.Settings().SetTheme(fyneTheme.CustomTheme{})
 	Win.SetCloseIntercept(func() {
 		winapi.HideWindow(title)
 		visible = false
 	})
+	App.Settings().SetTheme(fyneTheme.CustomTheme{})
+	App.Lifecycle().SetOnEnteredForeground(func() {
+		if !initialized {
+			winapi.HideWindow(title)
+			winapi.HideMinMaxButtons(title)
+			winapi.HideWindowFromTaskbar(title)
+			winapi.SetTopmost(title)
 
-	go systray.Run(initTray, func() {})
+			size := Win.Canvas().Size()
+			winapi.MoveWindow(title, int32(screenWidth-int(size.Width)-20), int32(screenHeight-int(size.Height)-45-taskbarHeight), int32(size.Width), int32(size.Height))
+			initialized = true
+		}
+	})
 
 	loadSettings()
 	renderButtons()
@@ -139,33 +159,13 @@ func main() {
 	ticker := time.NewTicker(5 * time.Second)
 	go func() {
 		for range ticker.C {
-			renderButtons()
+			newDeviceSettings := mmDeviceEnumerator.GetDevices()
+			if len(newDeviceSettings) != 0 && !reflect.DeepEqual(newDeviceSettings, lastDeviceSettings) {
+				lastDeviceSettings = newDeviceSettings
+				renderButtons()
+			}
 		}
 	}()
-
-	// go func() {
-	// 	for !winapi.WindowExists(title) {
-	// 		time.Sleep(100 * time.Millisecond)
-	// 	}
-	// 	time.Sleep(500 * time.Millisecond)
-	// 	winapi.HideWindow(title)
-	// 	winapi.DisableMinMaxButtons(title)
-	// 	winapi.HideWindowFromTaskbar(title)
-	// 	winapi.SetWindowAlwaysOnTop(title)
-
-	// 	size := Win.Canvas().Size()
-	// 	winapi.MoveWindow(title, int32(screenWidth-int(size.Width)-20), int32(screenHeight-int(size.Height)-45-taskbarHeight), int32(size.Width), int32(size.Height))
-	// }()
-
-	App.Lifecycle().SetOnEnteredForeground(func() {
-		winapi.HideWindow(title)
-		winapi.DisableMinMaxButtons(title)
-		winapi.HideWindowFromTaskbar(title)
-		winapi.SetWindowAlwaysOnTop(title)
-
-		size := Win.Canvas().Size()
-		winapi.MoveWindow(title, int32(screenWidth-int(size.Width)-20), int32(screenHeight-int(size.Height)-45-taskbarHeight), int32(size.Width), int32(size.Height))
-	})
 
 	Win.ShowAndRun()
 }
@@ -242,6 +242,7 @@ func renderButtons() {
 			}
 
 			configWin = App.NewWindow("Configure")
+			configWin.SetIcon(fyne.NewStaticResource("icon", icon)) // Set the icon when creating a new configuration window
 			configWin.SetContent(genConfigForm())
 			configWin.SetOnClosed(func() {
 				configureButton.Enable()
@@ -263,7 +264,7 @@ func renderButtons() {
 }
 
 func saveSettings() {
-	file, err := json.Marshal(settings)
+	fileData, err := json.Marshal(settings)
 	if err != nil {
 		//lint:ignore ST1005 Will not be logged to a console
 		errorDialog := dialog.NewError(fmt.Errorf("Error saving settings: %s", err), Win)
@@ -271,7 +272,10 @@ func saveSettings() {
 		return
 	}
 
-	err = os.WriteFile("settings.json", file, 0644)
+	// Ensure that the directory exists
+	os.MkdirAll(file.RoamingDir()+"/soundshift", os.ModePerm)
+
+	err = os.WriteFile(file.RoamingDir()+"/soundshift/settings.json", fileData, 0644)
 	if err != nil {
 		//lint:ignore ST1005 Will not be logged to a console
 		errorDialog := dialog.NewError(fmt.Errorf("Error saving settings: %s", err), Win)
@@ -280,7 +284,7 @@ func saveSettings() {
 }
 
 func loadSettings() {
-	_, err := os.Stat("settings.json")
+	_, err := os.Stat(file.RoamingDir() + "/soundshift/settings.json")
 	if os.IsNotExist(err) {
 		// Default settings.
 		settings = AppSettings{
@@ -291,7 +295,7 @@ func loadSettings() {
 		return
 	}
 
-	file, err := os.ReadFile("settings.json")
+	fileData, err := os.ReadFile(file.RoamingDir() + "/soundshift/settings.json")
 	if err != nil {
 		//lint:ignore ST1005 Will not be logged to a console
 		errorDialog := dialog.NewError(fmt.Errorf("Error loading settings: %s", err), Win)
@@ -299,7 +303,7 @@ func loadSettings() {
 		return
 	}
 
-	err = json.Unmarshal(file, &settings)
+	err = json.Unmarshal(fileData, &settings)
 	if err != nil {
 		//lint:ignore ST1005 Will not be logged to a console
 		errorDialog := dialog.NewError(fmt.Errorf("Error loading settings: %s", err), Win)
@@ -365,7 +369,7 @@ func genConfigForm() fyne.CanvasObject {
 			}
 		} else {
 			if file.Exists(file.RoamingDir() + "/Microsoft/Windows/Start Menu/Programs/Startup/soundshift.lnk") {
-				file.Delete(file.RoamingDir() + "/Microsoft/Windows/Start Menu/Programs/Startup/soundshift.lnk")
+				os.Remove(file.RoamingDir() + "/Microsoft/Windows/Start Menu/Programs/Startup/soundshift.lnk")
 			}
 		}
 
