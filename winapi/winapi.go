@@ -270,3 +270,53 @@ func RemoveTopmost(title string) {
 
 	_, _, _ = setwindowpos.Call(hwnd, IntToUintptr(-2), 0, 0, 0, 0, SWP_NOSIZE|SWP_NOMOVE)
 }
+
+func GetWindowPosition(title string) (x, y int32, err error) {
+	user32 := syscall.MustLoadDLL("user32.dll")
+	findWindow := user32.MustFindProc("FindWindowW")
+	getWindowRect := user32.MustFindProc("GetWindowRect")
+
+	ptr, err := syscall.UTF16PtrFromString(title)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	hwnd, _, _ := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
+	if hwnd == 0 {
+		return 0, 0, syscall.GetLastError()
+	}
+
+	var rect RECT
+	r1, _, err := getWindowRect.Call(hwnd, uintptr(unsafe.Pointer(&rect)))
+	if r1 == 0 {
+		return 0, 0, err
+	}
+
+	return rect.Left, rect.Top, nil
+}
+
+func GetWindowSize(title string) (width, height int32, err error) {
+	user32 := syscall.MustLoadDLL("user32.dll")
+	findWindow := user32.MustFindProc("FindWindowW")
+	getWindowRect := user32.MustFindProc("GetWindowRect")
+
+	ptr, err := syscall.UTF16PtrFromString(title)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	hwnd, _, _ := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
+	if hwnd == 0 {
+		return 0, 0, syscall.GetLastError()
+	}
+
+	var rect RECT
+	r1, _, err := getWindowRect.Call(hwnd, uintptr(unsafe.Pointer(&rect)))
+	if r1 == 0 {
+		return 0, 0, err
+	}
+
+	width = rect.Right - rect.Left
+	height = rect.Bottom - rect.Top
+	return width, height, nil
+}

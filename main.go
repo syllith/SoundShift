@@ -3,11 +3,11 @@ package main
 import (
 	_ "embed"
 	"encoding/json"
-	"fmt"
 	"image/color"
 	"os"
-	"reflect"
+	"soundshift/colormap"
 	"soundshift/file"
+	"soundshift/fyneCustom"
 	"soundshift/fyneTheme"
 	"soundshift/general"
 	"soundshift/interfaces/mmDeviceEnumerator"
@@ -16,13 +16,15 @@ import (
 	"time"
 
 	"github.com/energye/systray"
+	"github.com/go-vgo/robotgo"
 	"github.com/lxn/win"
+	"github.com/moutend/go-hook/pkg/mouse"
+	"github.com/moutend/go-hook/pkg/types"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
@@ -38,94 +40,62 @@ type AppSettings struct {
 	DeviceNames        map[string]DeviceConfig
 }
 
-type ColorButton struct {
-	widget.Button
-	backgroundColor color.Color
-	icon            fyne.Resource
-}
-
-func NewColorButton(label string, bgColor color.Color, icon fyne.Resource, tapped func()) *ColorButton {
-	btn := &ColorButton{
-		Button:          *widget.NewButtonWithIcon(label, icon, tapped),
-		backgroundColor: bgColor,
-		icon:            icon,
-	}
-	btn.ExtendBaseWidget(btn)
-	return btn
-}
-
-func (c *ColorButton) CreateRenderer() fyne.WidgetRenderer {
-	return &colorButtonRenderer{
-		button:       c,
-		textRenderer: canvas.NewText(c.Text, color.Black),
-		iconRenderer: canvas.NewImageFromResource(c.icon),
-		bgRenderer: &canvas.Rectangle{
-			FillColor:   c.backgroundColor,
-			StrokeColor: c.backgroundColor,
-		},
-	}
-}
-
-type colorButtonRenderer struct {
-	button       *ColorButton
-	textRenderer *canvas.Text
-	iconRenderer *canvas.Image
-	bgRenderer   *canvas.Rectangle
-}
-
-func (r *colorButtonRenderer) Destroy() {}
-
-func (r *colorButtonRenderer) Layout(size fyne.Size) {
-	r.textRenderer.Resize(size)
-	r.iconRenderer.Resize(fyne.NewSize(size.Width-4, size.Height-4))
-	r.bgRenderer.Resize(size)
-}
-
-func (r *colorButtonRenderer) MinSize() fyne.Size {
-	textMinSize := r.textRenderer.MinSize()
-	return fyne.NewSize(textMinSize.Width-4, textMinSize.Height-4)
-}
-
-func (r *colorButtonRenderer) Objects() []fyne.CanvasObject {
-	return []fyne.CanvasObject{r.bgRenderer, r.textRenderer, r.iconRenderer}
-}
-
-func (r *colorButtonRenderer) Refresh() {
-	r.textRenderer.Refresh()
-	r.iconRenderer.Refresh()
-	r.bgRenderer.Refresh()
-}
-
-func (r *colorButtonRenderer) BackgroundColor() color.Color {
-	return r.button.backgroundColor
-}
-
-//go:embed speaker.ico
-var icon []byte
-var title = "SoundShift"
-var App fyne.App = app.NewWithID(title)
-var Win fyne.Window = App.NewWindow(title)
-var configWin fyne.Window = App.NewWindow("Configure")
-var vbox = container.NewVBox()
-var mainView = container.NewCenter(container.NewPadded(vbox))
+var initialized = false
 var visible = false
 var configWindowOpen = false
-var lastDeviceSettings []mmDeviceEnumerator.AudioDevice
-
-var configureButton *widget.Button
 var settings AppSettings
 
 var screenWidth = int(win.GetSystemMetrics(win.SM_CXSCREEN))
 var screenHeight = int(win.GetSystemMetrics(win.SM_CYSCREEN))
 var taskbarHeight = winapi.GetTaskbarHeight()
-var initialized = false
+
+//go:embed speaker.ico
+var icon []byte
+var title = "SoundShift "
+var App fyne.App = app.NewWithID(title)
+var Win fyne.Window = App.NewWindow(title)
+var configWin fyne.Window = App.NewWindow("Configure")
+var deviceVbox = container.NewVBox()
+var mainView = container.NewCenter(
+	container.NewPadded(
+		container.NewVBox(
+			deviceVbox,
+			&canvas.Line{StrokeColor: colormap.Gray, StrokeWidth: 1},
+			configureButton,
+		),
+	),
+)
+
+var configureButton = &widget.Button{Text: "Configure"}
+
+func init() {
+	configureButton.OnTapped = func() {
+		configureButton.Disable()
+		configWindowOpen = true
+
+		if configWin != nil {
+			configWin.Close()
+		}
+
+		configWin = App.NewWindow("Configure")
+		configWin.SetIcon(fyne.NewStaticResource("icon", icon))
+		configWin.SetContent(genConfigForm())
+		configWin.Resize(fyne.NewSize(600, 500))
+		configWin.SetOnClosed(func() {
+			configureButton.Enable()
+			configWindowOpen = false
+		})
+		configWin.CenterOnScreen()
+		configWin.Show()
+	}
+	configureButton.Refresh()
+}
 
 func main() {
 	if general.IsProcRunning(title) {
+		//! SoundShift is already running, exit
 		os.Exit(0)
 	}
-
-	settings.DeviceNames = make(map[string]DeviceConfig)
 
 	go systray.Run(initTray, func() {})
 
@@ -155,201 +125,175 @@ func main() {
 
 	loadSettings()
 	renderButtons()
-
-	ticker := time.NewTicker(5 * time.Second)
-	go func() {
-		for range ticker.C {
-			newDeviceSettings := mmDeviceEnumerator.GetDevices()
-			if len(newDeviceSettings) != 0 && !reflect.DeepEqual(newDeviceSettings, lastDeviceSettings) {
-				lastDeviceSettings = newDeviceSettings
-				renderButtons()
-			}
-		}
-	}()
-
+	go hideOnClick()
+	go updateDevices()
 	Win.ShowAndRun()
 }
 
+func updateDevices() {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		go renderButtons()
+	}
+}
+
+func hideOnClick() {
+	mouseChan := make(chan types.MouseEvent)
+	mouse.Install(nil, mouseChan)
+
+	for k := range mouseChan {
+		if k.Message == 513 {
+			xMouse, yMouse := robotgo.Location()
+			xPos, yPos, _ := winapi.GetWindowPosition(title)
+			xSize, ySize, _ := winapi.GetWindowSize(title)
+			//* Check if mouse is outside of window, hide if true, unless config window is open or mouse is in taskbar
+			if (int(xMouse) < int(xPos) || int(xMouse) > int(xPos+xSize) || int(yMouse) < int(yPos) || int(yMouse) > int(yPos+ySize)) && !configWindowOpen && screenHeight-yMouse > winapi.GetTaskbarHeight() {
+				winapi.HideWindow(title)
+				visible = false
+			}
+		}
+	}
+}
+
 func renderButtons() {
+	//* Get audio devices
 	audioDevices := mmDeviceEnumerator.GetDevices()
 
-	//* Create audio device buttons
-	vbox.Objects = nil
-	for i := 0; i < len(audioDevices); i++ {
-		index := i
-		config, exists := settings.DeviceNames[audioDevices[i].Id]
+	//* Reset deviceVbox
+	deviceVbox.Objects = nil
+
+	//* Create button for each audio device
+	for i := range audioDevices {
+		//* Get device config
+		device := audioDevices[i]
+		config, exists := settings.DeviceNames[device.Id]
 		if !exists {
-			//* No override found, use default name
-			config = DeviceConfig{
-				Name:    audioDevices[i].Name,
-				IsShown: true,
-			}
+			//. Config did not exist, creating a new one
+			config = DeviceConfig{Name: device.Name, IsShown: true}
 		}
 
 		if !config.IsShown {
-			//* Device hidden, do not render
+			//! Device is hidden, skip button creation
 			continue
 		}
 
-		if audioDevices[i].IsDefault {
-			//* Default audio device
-			deviceName := config.Name
-			if len(deviceName) > 30 {
-				deviceName = general.EllipticalTruncate(deviceName, 30)
+		//* Get device name
+		deviceName := general.EllipticalTruncate(config.Name, 30)
+
+		//* Create button tapped function
+		onTapped := func() {
+			policyConfig.SetDefaultEndPoint(device.Id)
+			go renderButtons()
+			if settings.HideAfterSelection {
+				winapi.HideWindow(title)
+				visible = false
 			}
-			vbox.Add(widget.NewButtonWithIcon(deviceName, theme.VolumeUpIcon(), func() {
-				policyConfig.SetDefaultEndPoint(audioDevices[index].Id)
-				renderButtons()
-				if settings.HideAfterSelection {
-					winapi.HideWindow(title)
-					visible = false
-				}
-			}))
+		}
+
+		if device.IsDefault {
+			//* Add default audio device button
+			deviceVbox.Add(widget.NewButtonWithIcon(deviceName, theme.VolumeUpIcon(), onTapped))
 		} else {
-			//* Not default audio device
-			deviceName := config.Name
-			if len(deviceName) > 30 {
-				deviceName = general.EllipticalTruncate(deviceName, 30)
-			}
-			vbox.Add(&widget.Button{
-				Text: deviceName,
-				OnTapped: func() {
-					policyConfig.SetDefaultEndPoint(audioDevices[index].Id)
-					renderButtons()
-					if settings.HideAfterSelection {
-						winapi.HideWindow(title)
-						visible = false
-					}
-				},
-			})
+			//* Add non-default audio device button
+			deviceVbox.Add(&widget.Button{Text: deviceName, OnTapped: onTapped})
 		}
 	}
 
-	//* Create spacer
-	vbox.Add(&widget.Label{
-		Text: "",
-	})
-
-	//* Create configure button
-	configureButton = &widget.Button{
-		Text: "Configure",
-		OnTapped: func() {
-			configureButton.Disable()
-			configWindowOpen = true
-
-			if configWin != nil {
-				configWin.Close()
-			}
-
-			configWin = App.NewWindow("Configure")
-			configWin.SetIcon(fyne.NewStaticResource("icon", icon)) // Set the icon when creating a new configuration window
-			configWin.SetContent(genConfigForm())
-			configWin.SetOnClosed(func() {
-				configureButton.Enable()
-				configWindowOpen = false
-			})
-			configWin.CenterOnScreen()
-			configWin.Show()
-		},
-	}
-
+	//* Update configure button state
 	if configWindowOpen {
-		configureButton.Disable()             // if config window is open, disable the button
-		configWin.SetContent(genConfigForm()) // regenerate config form if window is open
+		configureButton.Disable()
+		configWin.SetContent(genConfigForm())
 	}
 
-	vbox.Add(configureButton)
-
-	mainView.Refresh()
-}
-
-func saveSettings() {
-	fileData, err := json.Marshal(settings)
-	if err != nil {
-		//lint:ignore ST1005 Will not be logged to a console
-		errorDialog := dialog.NewError(fmt.Errorf("Error saving settings: %s", err), Win)
-		errorDialog.Show()
-		return
-	}
-
-	// Ensure that the directory exists
-	os.MkdirAll(file.RoamingDir()+"/soundshift", os.ModePerm)
-
-	err = os.WriteFile(file.RoamingDir()+"/soundshift/settings.json", fileData, 0644)
-	if err != nil {
-		//lint:ignore ST1005 Will not be logged to a console
-		errorDialog := dialog.NewError(fmt.Errorf("Error saving settings: %s", err), Win)
-		errorDialog.Show()
+	for i := range deviceVbox.Objects {
+		deviceVbox.Objects[i].Refresh()
 	}
 }
 
 func loadSettings() {
-	_, err := os.Stat(file.RoamingDir() + "/soundshift/settings.json")
-	if os.IsNotExist(err) {
-		// Default settings.
-		settings = AppSettings{
-			HideAfterSelection: false,
-			DeviceNames:        make(map[string]DeviceConfig),
+	settingsPath := file.RoamingDir() + "/soundshift/settings.json"
+
+	//* Initialize settings with default values
+	settings = AppSettings{
+		HideAfterSelection: false,
+		DeviceNames:        make(map[string]DeviceConfig),
+	}
+
+	//* Read settings file
+	fileData, err := os.ReadFile(settingsPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			//. Settings file does not exist, creating a new one
+			saveSettings()
 		}
-		saveSettings() // this will create settings.json with default settings
 		return
 	}
 
-	fileData, err := os.ReadFile(file.RoamingDir() + "/soundshift/settings.json")
-	if err != nil {
-		//lint:ignore ST1005 Will not be logged to a console
-		errorDialog := dialog.NewError(fmt.Errorf("Error loading settings: %s", err), Win)
-		errorDialog.Show()
-		return
-	}
+	//* Parse settings from file data
+	json.Unmarshal(fileData, &settings)
 
-	err = json.Unmarshal(fileData, &settings)
-	if err != nil {
-		//lint:ignore ST1005 Will not be logged to a console
-		errorDialog := dialog.NewError(fmt.Errorf("Error loading settings: %s", err), Win)
-		errorDialog.Show()
-		return
-	}
-
+	//* Ensure DeviceNames is initialized
 	if settings.DeviceNames == nil {
 		settings.DeviceNames = make(map[string]DeviceConfig)
 	}
 }
 
-func genConfigForm() fyne.CanvasObject {
-	form := &widget.Form{}
+func saveSettings() {
+	fileData, _ := json.Marshal(settings)
+	os.MkdirAll(file.RoamingDir()+"/soundshift", os.ModePerm)
+	os.WriteFile(file.RoamingDir()+"/soundshift/settings.json", fileData, 0644)
+}
 
+func genConfigForm() fyne.CanvasObject {
+	//* Get audio devices
 	audioDevices := mmDeviceEnumerator.GetDevices()
 
-	for i := 0; i < len(audioDevices); i++ {
-		deviceName := audioDevices[i].Name
-		newNameEntry := &widget.Entry{}
-		showHideCheckbox := widget.NewCheck("Shown                                            ", nil)
-
-		config, exists := settings.DeviceNames[audioDevices[i].Id]
+	//* Create form
+	form := &widget.Form{}
+	for _, device := range audioDevices {
+		//* Get device config
+		config, exists := settings.DeviceNames[device.Id]
 		if !exists {
+			//. Config did not exist,using default
 			config = DeviceConfig{
-				Name:    audioDevices[i].Name,
+				Name:    device.Name,
 				IsShown: true,
 			}
 		}
-		newNameEntry.SetText(config.Name)
-		showHideCheckbox.SetChecked(config.IsShown)
 
-		newNameEntry.ActionItem = NewColorButton("", color.RGBA{68, 72, 81, 255}, theme.MediaReplayIcon(), func() {
-			newNameEntry.SetText(deviceName)
-		})
+		//* Create new name entry
+		newNameEntry := &widget.Entry{
+			PlaceHolder: "Device Name",
+			ActionItem:  fyneCustom.NewColorButton("", color.RGBA{68, 72, 81, 255}, theme.MediaReplayIcon(), func() {}),
+			Text:        config.Name,
+		}
 
-		form.Append(deviceName, newNameEntry)
+		//* Create show/hide checkbox
+		showHideCheckbox := &widget.Check{
+			Text:    "Shown",
+			Checked: config.IsShown,
+		}
+
+		//* Append elements to the form
+		form.Append(device.Name, newNameEntry)
 		form.Append("", showHideCheckbox)
 	}
 
-	hideAfterSelectionCheckbox := widget.NewCheck("Hide after selection", nil)
-	hideAfterSelectionCheckbox.SetChecked(settings.HideAfterSelection)
+	//* Create hide after selection checkbox
+	hideAfterSelectionCheckbox := &widget.Check{
+		Text:    "Hide after selection",
+		Checked: settings.HideAfterSelection,
+	}
 
-	startWithWindowsCheckbox := widget.NewCheck("Start with Windows", nil)
-	startWithWindowsCheckbox.SetChecked(file.Exists(file.RoamingDir() + "/Microsoft/Windows/Start Menu/Programs/Startup/soundshift.lnk"))
+	//* Create start with windows checkbox
+	startWithWindowsCheckbox := &widget.Check{
+		Text:    "Start with Windows",
+		Checked: file.Exists(file.RoamingDir() + "/Microsoft/Windows/Start Menu/Programs/Startup/soundshift.lnk"),
+	}
 
+	//* Create save button
 	saveButton := widget.NewButton("     Save     ", func() {
 		for i := 0; i < len(audioDevices); i++ {
 			newNameEntry := form.Items[i*2].Widget.(*widget.Entry)
@@ -374,13 +318,14 @@ func genConfigForm() fyne.CanvasObject {
 		}
 
 		saveSettings()
-		renderButtons()
+		configWin.Close()
+		go renderButtons()
 	})
 
 	saveButtonContainer := container.New(layout.NewCenterLayout(), saveButton)
 	checkboxAndButtonVBox := container.NewVBox(hideAfterSelectionCheckbox, startWithWindowsCheckbox, saveButtonContainer)
 	centeredCheckboxAndButtonContainer := container.New(layout.NewCenterLayout(), checkboxAndButtonVBox)
-	borderContainer := container.NewBorder(form, centeredCheckboxAndButtonContainer, nil, nil, nil)
+	borderContainer := container.NewPadded(container.NewBorder(form, centeredCheckboxAndButtonContainer, nil, nil, nil))
 	return borderContainer
 }
 
@@ -388,7 +333,7 @@ func initTray() {
 	systray.SetIcon(icon)
 	systray.SetTitle(title)
 	systray.SetTooltip(title)
-	systray.SetOnClick(func() {
+	systray.SetOnClick(func(menu systray.IMenu) {
 		if visible {
 			winapi.HideWindow(title)
 			visible = false
