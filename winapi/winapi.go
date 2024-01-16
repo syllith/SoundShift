@@ -233,6 +233,26 @@ func HideWindow(title string) {
 	_, _, _ = showWindow.Call(hwnd, uintptr(SW_HIDE))
 }
 
+// . Checks if the window is visible
+func IsWindowVisible(title string) bool {
+	user32 := syscall.MustLoadDLL("user32.dll")
+	findWindow := user32.MustFindProc("FindWindowW")
+	isWindowVisible := user32.MustFindProc("IsWindowVisible")
+
+	ptr, err := syscall.UTF16PtrFromString(title)
+	if err != nil {
+		return false
+	}
+
+	hwnd, _, _ := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
+	if hwnd == 0 {
+		return false
+	}
+
+	ret, _, _ := isWindowVisible.Call(hwnd)
+	return ret != 0
+}
+
 // . Sets the window to be topmost
 func SetTopmost(title string) {
 	user32dll := windows.MustLoadDLL("user32.dll")

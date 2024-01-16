@@ -5,6 +5,7 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
 
@@ -12,6 +13,13 @@ type ColorButton struct {
 	widget.Button
 	backgroundColor color.Color
 	icon            fyne.Resource
+}
+
+type colorButtonRenderer struct {
+	button       *ColorButton
+	textRenderer *canvas.Text
+	iconRenderer *canvas.Image
+	bgRenderer   *canvas.Rectangle
 }
 
 func NewColorButton(label string, bgColor color.Color, icon fyne.Resource, tapped func()) *ColorButton {
@@ -34,13 +42,6 @@ func (c *ColorButton) CreateRenderer() fyne.WidgetRenderer {
 			StrokeColor: c.backgroundColor,
 		},
 	}
-}
-
-type colorButtonRenderer struct {
-	button       *ColorButton
-	textRenderer *canvas.Text
-	iconRenderer *canvas.Image
-	bgRenderer   *canvas.Rectangle
 }
 
 func (r *colorButtonRenderer) Destroy() {}
@@ -68,4 +69,42 @@ func (r *colorButtonRenderer) Refresh() {
 
 func (r *colorButtonRenderer) BackgroundColor() color.Color {
 	return r.button.backgroundColor
+}
+
+// ! Form
+type CustomVBoxLayout struct {
+	FixedWidth float32
+}
+
+func (c *CustomVBoxLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	y := float32(0)
+	padding := theme.Padding()
+
+	// The horizontal position is calculated to center the buttons in the space
+	x := (size.Width - c.FixedWidth) / 2
+
+	for _, obj := range objects {
+		if obj.Visible() {
+			obj.Move(fyne.NewPos(x, y))                                  // Center the object horizontally
+			obj.Resize(fyne.NewSize(c.FixedWidth, obj.MinSize().Height)) // Set a fixed width for each object
+			y += obj.MinSize().Height + padding                          // Increment y position for the next object
+		}
+	}
+}
+
+func (c *CustomVBoxLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
+	totalHeight := float32(0)
+	padding := theme.Padding()
+
+	for _, obj := range objects {
+		if obj.Visible() {
+			totalHeight += obj.MinSize().Height + padding // Calculate the total height
+		}
+	}
+
+	if len(objects) > 0 {
+		totalHeight -= padding // Remove extra padding after the last element
+	}
+
+	return fyne.NewSize(c.FixedWidth, totalHeight) // Return the fixed width for the layout's minimum size
 }

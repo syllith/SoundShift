@@ -41,9 +41,10 @@ type AppSettings struct {
 }
 
 var initialized = false
-var visible = false
 var configWindowOpen = false
 var settings AppSettings
+var lastInteractionTime time.Time
+var debounceDuration = 100 * time.Millisecond
 
 var screenWidth = int(win.GetSystemMetrics(win.SM_CXSCREEN))
 var screenHeight = int(win.GetSystemMetrics(win.SM_CYSCREEN))
@@ -55,7 +56,10 @@ var title = "SoundShift "
 var App fyne.App = app.NewWithID(title)
 var Win fyne.Window = App.NewWindow(title)
 var configWin fyne.Window = App.NewWindow("Configure")
-var deviceVbox = container.NewVBox()
+
+// var deviceVbox = container.NewVBox()
+
+var deviceVbox = container.New(&fyneCustom.CustomVBoxLayout{FixedWidth: 150})
 var mainView = container.NewCenter(
 	container.NewPadded(
 		container.NewVBox(
@@ -97,8 +101,6 @@ func main() {
 		os.Exit(0)
 	}
 
-	go systray.Run(initTray, func() {})
-
 	Win.SetContent(mainView)
 	Win.SetTitle(title)
 	Win.SetIcon(fyne.NewStaticResource("icon", icon))
@@ -107,7 +109,6 @@ func main() {
 	Win.SetFixedSize(true)
 	Win.SetCloseIntercept(func() {
 		winapi.HideWindow(title)
-		visible = false
 	})
 	App.Settings().SetTheme(fyneTheme.CustomTheme{})
 	App.Lifecycle().SetOnEnteredForeground(func() {
@@ -127,6 +128,7 @@ func main() {
 	renderButtons()
 	go hideOnClick()
 	go updateDevices()
+	go systray.Run(initTray, func() {})
 	Win.ShowAndRun()
 }
 
@@ -142,19 +144,35 @@ func updateDevices() {
 func hideOnClick() {
 	mouseChan := make(chan types.MouseEvent)
 	mouse.Install(nil, mouseChan)
+	defer mouse.Uninstall()
 
 	for k := range mouseChan {
 		if k.Message == 513 {
-			xMouse, yMouse := robotgo.Location()
-			xPos, yPos, _ := winapi.GetWindowPosition(title)
-			xSize, ySize, _ := winapi.GetWindowSize(title)
-			//* Check if mouse is outside of window, hide if true, unless config window is open or mouse is in taskbar
-			if (int(xMouse) < int(xPos) || int(xMouse) > int(xPos+xSize) || int(yMouse) < int(yPos) || int(yMouse) > int(yPos+ySize)) && !configWindowOpen && screenHeight-yMouse > winapi.GetTaskbarHeight() {
-				winapi.HideWindow(title)
-				visible = false
+			if !isMouseInWindow() && !isMouseInTaskbar() && !configWindowOpen {
+				lastInteractionTime = time.Now()
+				go debounceHideWindow()
 			}
 		}
 	}
+}
+
+func debounceHideWindow() {
+	time.Sleep(debounceDuration)
+	if time.Since(lastInteractionTime) >= debounceDuration && winapi.IsWindowVisible(title) {
+		winapi.HideWindow(title)
+	}
+}
+
+func isMouseInWindow() bool {
+	xMouse, yMouse := robotgo.Location()
+	xPos, yPos, _ := winapi.GetWindowPosition(title)
+	xSize, ySize, _ := winapi.GetWindowSize(title)
+	return int(xMouse) >= int(xPos) && int(xMouse) <= int(xPos+xSize) && int(yMouse) >= int(yPos) && int(yMouse) <= int(yPos+ySize)
+}
+
+func isMouseInTaskbar() bool {
+	_, yMouse := robotgo.Location()
+	return screenHeight-yMouse <= winapi.GetTaskbarHeight()
 }
 
 func renderButtons() {
@@ -180,7 +198,7 @@ func renderButtons() {
 		}
 
 		//* Get device name
-		deviceName := general.EllipticalTruncate(config.Name, 30)
+		deviceName := general.EllipticalTruncate(config.Name, 20)
 
 		//* Create button tapped function
 		onTapped := func() {
@@ -188,7 +206,6 @@ func renderButtons() {
 			go renderButtons()
 			if settings.HideAfterSelection {
 				winapi.HideWindow(title)
-				visible = false
 			}
 		}
 
@@ -334,12 +351,13 @@ func initTray() {
 	systray.SetTitle(title)
 	systray.SetTooltip(title)
 	systray.SetOnClick(func(menu systray.IMenu) {
-		if visible {
+		if winapi.IsWindowVisible(title) {
 			winapi.HideWindow(title)
-			visible = false
 		} else {
+			size := Win.Canvas().Size()
+			winapi.MoveWindow(title, int32(screenWidth-int(size.Width)-20), int32(screenHeight-int(size.Height)-45-taskbarHeight), int32(size.Width), int32(size.Height))
 			winapi.ShowWindow(title)
-			visible = true
+			winapi.SetTopmost(title)
 		}
 	})
 
