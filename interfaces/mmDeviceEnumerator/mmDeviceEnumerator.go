@@ -14,58 +14,67 @@ type AudioDevice struct {
 	IsDefault bool
 }
 
-func GetDevices() []AudioDevice {
-	if err := ole.CoInitializeEx(0, ole.COINIT_APARTMENTTHREADED); err != nil {
-		return nil
+func GetDevices() ([]AudioDevice, error) {
+	if err := ole.CoInitializeEx(0, ole.COINIT_MULTITHREADED); err != nil {
+		return nil, fmt.Errorf("failed to initialize COM library: %w", err)
 	}
 	defer ole.CoUninitialize()
 
 	var mmde *wca.IMMDeviceEnumerator
 	if err := wca.CoCreateInstance(wca.CLSID_MMDeviceEnumerator, 0, wca.CLSCTX_ALL, wca.IID_IMMDeviceEnumerator, &mmde); err != nil {
-		fmt.Println(err)
-		return nil
+		return nil, fmt.Errorf("failed to create device enumerator: %w", err)
 	}
 	defer mmde.Release()
 
 	var defaultDevice *wca.IMMDevice
 	if err := mmde.GetDefaultAudioEndpoint(wca.ERender, wca.EConsole, &defaultDevice); err != nil {
-		fmt.Println(err)
-		return nil
+		return nil, fmt.Errorf("failed to get default audio endpoint: %w", err)
 	}
 	defer defaultDevice.Release()
 
 	var defaultId string
-	defaultDevice.GetId(&defaultId)
+	if err := defaultDevice.GetId(&defaultId); err != nil {
+		return nil, fmt.Errorf("failed to get ID of default device: %w", err)
+	}
 
 	var mmdc *wca.IMMDeviceCollection
-	mmde.EnumAudioEndpoints(wca.ERender, wca.DEVICE_STATE_ACTIVE, &mmdc)
+	if err := mmde.EnumAudioEndpoints(wca.ERender, wca.DEVICE_STATE_ACTIVE, &mmdc); err != nil {
+		return nil, fmt.Errorf("failed to enumerate audio endpoints: %w", err)
+	}
 	defer mmdc.Release()
 
 	var count uint32
-	mmdc.GetCount(&count)
-
-	audioDevices := make([]AudioDevice, count)
-
-	for i := 0; i < int(count); i++ {
-		var device *wca.IMMDevice
-		mmdc.Item(uint32(i), &device)
-
-		var id string
-		device.GetId(&id)
-
-		var propStore *wca.IPropertyStore
-		device.OpenPropertyStore(wca.STGM_READ, &propStore)
-
-		var name wca.PROPVARIANT
-		propStore.GetValue(&wca.PKEY_Device_FriendlyName, &name)
-		propStore.Release() // Release the property store after getting the name.
-
-		isDefault := id == defaultId
-
-		audioDevices[i] = AudioDevice{Name: name.String(), Id: id, IsDefault: isDefault}
-
-		device.Release() // Release the device after processing.
+	if err := mmdc.GetCount(&count); err != nil {
+		return nil, fmt.Errorf("failed to get count of devices: %w", err)
 	}
 
-	return audioDevices
+	audioDevices := make([]AudioDevice, count)
+	for i := uint32(0); i < count; i++ {
+		var device *wca.IMMDevice
+		if err := mmdc.Item(i, &device); err != nil {
+			return nil, fmt.Errorf("failed to get device at index %d: %w", i, err)
+		}
+		defer device.Release()
+
+		var id string
+		if err := device.GetId(&id); err != nil {
+			return nil, fmt.Errorf("failed to get ID for device at index %d: %w", i, err)
+		}
+
+		var propStore *wca.IPropertyStore
+		if err := device.OpenPropertyStore(wca.STGM_READ, &propStore); err != nil {
+			return nil, fmt.Errorf("failed to open property store for device at index %d: %w", i, err)
+		}
+		defer propStore.Release()
+
+		var name wca.PROPVARIANT
+		if err := propStore.GetValue(&wca.PKEY_Device_FriendlyName, &name); err != nil {
+			return nil, fmt.Errorf("failed to get device name for device at index %d: %w", i, err)
+		}
+
+		isDefault := id == defaultId
+		audioDevices[i] = AudioDevice{Name: name.String(), Id: id, IsDefault: isDefault}
+	}
+
+	return audioDevices, nil
 }

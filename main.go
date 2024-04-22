@@ -3,6 +3,7 @@ package main
 import (
 	_ "embed"
 	"encoding/json"
+	"fmt"
 	"image/color"
 	"os"
 	"soundshift/colormap"
@@ -56,8 +57,6 @@ var title = "SoundShift "
 var App fyne.App = app.NewWithID(title)
 var Win fyne.Window = App.NewWindow(title)
 var configWin fyne.Window = App.NewWindow("Configure")
-
-// var deviceVbox = container.NewVBox()
 
 var deviceVbox = container.New(&fyneCustom.CustomVBoxLayout{FixedWidth: 150})
 var mainView = container.NewCenter(
@@ -133,7 +132,7 @@ func main() {
 }
 
 func updateDevices() {
-	ticker := time.NewTicker(10 * time.Second)
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
 	for range ticker.C {
@@ -177,7 +176,12 @@ func isMouseInTaskbar() bool {
 
 func renderButtons() {
 	//* Get audio devices
-	audioDevices := mmDeviceEnumerator.GetDevices()
+	audioDevices, err := mmDeviceEnumerator.GetDevices()
+	if err != nil || audioDevices == nil {
+		fmt.Println("Error getting audio devices:", err)
+		general.LogError("Error getting audio devices:", err)
+		return
+	}
 
 	//* Reset deviceVbox
 	deviceVbox.Objects = nil
@@ -202,7 +206,13 @@ func renderButtons() {
 
 		//* Create button tapped function
 		onTapped := func() {
-			policyConfig.SetDefaultEndPoint(device.Id)
+			err := policyConfig.SetDefaultEndPoint(device.Id)
+			if err != nil {
+				fmt.Println("Error setting default endpoint:", err)
+				general.LogError("Error setting default endpoint:", err)
+				return
+			}
+
 			go renderButtons()
 			if settings.HideAfterSelection {
 				winapi.HideWindow(title)
@@ -258,14 +268,19 @@ func loadSettings() {
 }
 
 func saveSettings() {
-	fileData, _ := json.Marshal(settings)
+	fileData, _ := json.MarshalIndent(settings, "", "    ")
 	os.MkdirAll(file.RoamingDir()+"/soundshift", os.ModePerm)
 	os.WriteFile(file.RoamingDir()+"/soundshift/settings.json", fileData, 0644)
 }
 
 func genConfigForm() fyne.CanvasObject {
 	//* Get audio devices
-	audioDevices := mmDeviceEnumerator.GetDevices()
+	audioDevices, err := mmDeviceEnumerator.GetDevices()
+	if err != nil || audioDevices == nil {
+		fmt.Println("Error getting audio devices:", err)
+		general.LogError("Error getting audio devices:", err)
+		return nil
+	}
 
 	//* Create form
 	form := &widget.Form{}

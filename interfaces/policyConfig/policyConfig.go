@@ -1,6 +1,8 @@
 package policyConfig
 
 import (
+	"errors"
+	"fmt"
 	"syscall"
 	"unsafe"
 
@@ -33,15 +35,22 @@ func (v *IPolicyConfig) VTable() *IPolicyConfigVtbl {
 	return (*IPolicyConfigVtbl)(unsafe.Pointer(v.RawVTable))
 }
 
-func (v *IPolicyConfig) SetDefaultEndpoint(deviceID string, eRole wca.ERole) (err error) {
-	err = pcvSetDefaultEndpoint(v, deviceID, eRole)
-	return
+func (v *IPolicyConfig) SetDefaultEndpoint(deviceID string, eRole wca.ERole) error {
+	err := pcvSetDefaultEndpoint(v, deviceID, eRole)
+	if err != nil {
+		return fmt.Errorf("failed to set default endpoint: %w", err)
+	}
+	return nil
 }
 
 // * Exports
-func SetDefaultEndPoint(deviceId string) {
-	if err := ole.CoInitializeEx(0, ole.COINIT_APARTMENTTHREADED); err != nil {
-		return
+func SetDefaultEndPoint(deviceId string) error {
+	if deviceId == "" {
+		return fmt.Errorf("invalid device ID provided")
+	}
+
+	if err := ole.CoInitializeEx(0, ole.COINIT_MULTITHREADED); err != nil {
+		return fmt.Errorf("failed to initialize COM library: %w", err)
 	}
 	defer ole.CoUninitialize()
 
@@ -50,29 +59,42 @@ func SetDefaultEndPoint(deviceId string) {
 
 	var pcv *IPolicyConfig
 	if err := wca.CoCreateInstance(CPolicyConfigClientUID, 0, wca.CLSCTX_ALL, IPolicyConfigUID, &pcv); err != nil {
-
-		return
+		return fmt.Errorf("failed to create IPolicyConfig instance: %w", err)
 	}
 	defer pcv.Release()
 
-	pcv.SetDefaultEndpoint(deviceId, wca.EMultimedia)
-	pcv.SetDefaultEndpoint(deviceId, wca.ECommunications)
+	roles := []wca.ERole{wca.EMultimedia, wca.ECommunications}
+	for _, role := range roles {
+		if err := pcv.SetDefaultEndpoint(deviceId, role); err != nil {
+			return fmt.Errorf("failed to set default endpoint for role %v: %w", role, err)
+		}
+	}
+
+	return nil
 }
 
 // * Backend
-func pcvSetDefaultEndpoint(pcv *IPolicyConfig, deviceID string, eRole wca.ERole) (err error) {
-	var ptr *uint16
-	if ptr, err = syscall.UTF16PtrFromString(deviceID); err != nil {
-		return
+func pcvSetDefaultEndpoint(pcv *IPolicyConfig, deviceID string, eRole wca.ERole) error {
+	if pcv == nil {
+		return errors.New("IPolicyConfig reference cannot be nil")
 	}
 
-	hr, _, _ := syscall.SyscallN(
+	ptr, err := syscall.UTF16PtrFromString(deviceID)
+	if err != nil {
+		return fmt.Errorf("failed to convert deviceID to UTF16 pointer: %w", err)
+	}
+
+	hr, _, e := syscall.SyscallN(
 		pcv.VTable().SetDefaultEndpoint,
 		uintptr(unsafe.Pointer(pcv)),
 		uintptr(unsafe.Pointer(ptr)),
-		uintptr(uint32(eRole)))
-	if hr != 0 {
-		err = ole.NewError(hr)
+		uintptr(uint32(eRole)),
+	)
+	if e != 0 {
+		return fmt.Errorf("syscall failed: %v", e)
 	}
-	return
+	if hr != 0 {
+		return ole.NewError(hr)
+	}
+	return nil
 }
