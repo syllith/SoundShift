@@ -3,7 +3,6 @@ package mmDeviceEnumerator
 import (
 	"fmt"
 
-	"github.com/go-ole/go-ole"
 	"github.com/moutend/go-wca/pkg/wca"
 )
 
@@ -15,10 +14,10 @@ type AudioDevice struct {
 }
 
 func GetDevices() ([]AudioDevice, error) {
-	if err := ole.CoInitializeEx(0, ole.COINIT_MULTITHREADED); err != nil {
-		return nil, fmt.Errorf("failed to initialize COM library: %w", err)
-	}
-	defer ole.CoUninitialize()
+	// if err := ole.CoInitializeEx(0, ole.COINIT_MULTITHREADED); err != nil {
+	// 	return nil, fmt.Errorf("failed to initialize COM library: %w", err)
+	// }
+	// defer ole.CoUninitialize()
 
 	var mmde *wca.IMMDeviceEnumerator
 	if err := wca.CoCreateInstance(wca.CLSID_MMDeviceEnumerator, 0, wca.CLSCTX_ALL, wca.IID_IMMDeviceEnumerator, &mmde); err != nil {

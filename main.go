@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/energye/systray"
+	"github.com/go-ole/go-ole"
 	"github.com/go-vgo/robotgo"
 	"github.com/lxn/win"
 	"github.com/moutend/go-hook/pkg/mouse"
@@ -100,6 +101,13 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Initialize COM at the start of the application
+	if err := ole.CoInitializeEx(0, ole.COINIT_MULTITHREADED); err != nil {
+		fmt.Println("Failed to initialize COM library:", err)
+		return
+	}
+	defer ole.CoUninitialize()
+
 	Win.SetContent(mainView)
 	Win.SetTitle(title)
 	Win.SetIcon(fyne.NewStaticResource("icon", icon))
@@ -132,7 +140,7 @@ func main() {
 }
 
 func updateDevices() {
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 
 	for range ticker.C {
