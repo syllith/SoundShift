@@ -33,8 +33,9 @@ import (
 )
 
 type DeviceConfig struct {
-	Name    string
-	IsShown bool
+	Name         string
+	IsShown      bool
+	OriginalName string
 }
 
 type AppSettings struct {
@@ -325,17 +326,24 @@ func genConfigForm() fyne.CanvasObject {
 		if !exists {
 			//. Config did not exist,using default
 			config = DeviceConfig{
-				Name:    device.Name,
-				IsShown: true,
+				Name:         device.Name,
+				IsShown:      true,
+				OriginalName: device.Name,
 			}
 		}
 
 		//* Create new name entry
 		newNameEntry := &widget.Entry{
 			PlaceHolder: "Device Name",
-			ActionItem:  fyneCustom.NewColorButton("", color.RGBA{68, 72, 81, 255}, theme.MediaReplayIcon(), func() {}),
 			Text:        config.Name,
 		}
+
+		//* Create reset button
+		resetButton := fyneCustom.NewColorButton("", color.RGBA{68, 72, 81, 255}, theme.MediaReplayIcon(), func() {
+			newNameEntry.SetText(config.OriginalName)
+		})
+
+		newNameEntry.ActionItem = resetButton
 
 		//* Create show/hide checkbox
 		showHideCheckbox := &widget.Check{
@@ -367,8 +375,9 @@ func genConfigForm() fyne.CanvasObject {
 			showHideCheckbox := form.Items[i*2+1].Widget.(*widget.Check)
 
 			settings.DeviceNames[audioDevices[i].Id] = DeviceConfig{
-				Name:    newNameEntry.Text,
-				IsShown: showHideCheckbox.Checked,
+				Name:         newNameEntry.Text,
+				IsShown:      showHideCheckbox.Checked,
+				OriginalName: audioDevices[i].Name,
 			}
 
 			settings.HideAfterSelection = hideAfterSelectionCheckbox.Checked
