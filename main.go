@@ -47,6 +47,7 @@ var configWindowOpen = false
 var settings AppSettings
 var lastInteractionTime time.Time
 var debounceDuration = 100 * time.Millisecond
+var currentDeviceID string
 
 var screenWidth = int(win.GetSystemMetrics(win.SM_CXSCREEN))
 var screenHeight = int(win.GetSystemMetrics(win.SM_CYSCREEN))
@@ -66,13 +67,30 @@ var mainView = container.NewCenter(
 			deviceVbox,
 			&canvas.Line{StrokeColor: colormap.Gray, StrokeWidth: 1},
 			configureButton,
+			container.NewPadded(volumeSlider),
 		),
 	),
 )
 
 var configureButton = &widget.Button{Text: "Configure"}
 
+var volumeSlider = &widget.Slider{
+	Min:   0,
+	Max:   100,
+	Value: 0,
+}
+
 func init() {
+	volumeSlider.OnChanged = func(f float64) {
+		// Convert the slider value (0 to 100) to a scalar (0.0 to 1.0)
+		volumeScalar := float32(f / 100.0)
+		if currentDeviceID != "" {
+			if err := policyConfig.SetVolume(currentDeviceID, volumeScalar); err != nil {
+				fmt.Println("Error setting volume:", err)
+			}
+		}
+	}
+
 	configureButton.OnTapped = func() {
 		configureButton.Disable()
 		configWindowOpen = true
@@ -232,6 +250,13 @@ func renderButtons() {
 		if device.IsDefault {
 			//* Add default audio device button
 			deviceVbox.Add(widget.NewButtonWithIcon(deviceName, theme.VolumeUpIcon(), onTapped))
+			currentDeviceID = device.Id
+			volume, err := policyConfig.GetVolume(currentDeviceID)
+			if err != nil {
+				fmt.Println("Error getting volume:", err)
+			} else {
+				volumeSlider.SetValue(float64(volume * 100)) // Convert volume scalar to percentage
+			}
 		} else {
 			//* Add non-default audio device button
 			deviceVbox.Add(&widget.Button{Text: deviceName, OnTapped: onTapped})

@@ -98,3 +98,110 @@ func pcvSetDefaultEndpoint(pcv *IPolicyConfig, deviceID string, eRole wca.ERole)
 	}
 	return nil
 }
+
+func SetVolume(deviceID string, volumeLevel float32) error {
+	var deviceEnumerator *wca.IMMDeviceEnumerator
+	var deviceCollection *wca.IMMDeviceCollection
+	var audioEndpointVolume *wca.IAudioEndpointVolume
+
+	if err := ole.CoInitializeEx(0, ole.COINIT_MULTITHREADED); err != nil {
+		return fmt.Errorf("failed to initialize COM library: %w", err)
+	}
+	defer ole.CoUninitialize()
+
+	if err := wca.CoCreateInstance(wca.CLSID_MMDeviceEnumerator, 0, wca.CLSCTX_ALL, wca.IID_IMMDeviceEnumerator, &deviceEnumerator); err != nil {
+		return fmt.Errorf("failed to create device enumerator instance: %w", err)
+	}
+	defer deviceEnumerator.Release()
+
+	if err := deviceEnumerator.EnumAudioEndpoints(wca.ERender, wca.DEVICE_STATE_ACTIVE, &deviceCollection); err != nil {
+		return fmt.Errorf("failed to enumerate audio endpoints: %w", err)
+	}
+	defer deviceCollection.Release()
+
+	var count uint32
+	if err := deviceCollection.GetCount(&count); err != nil {
+		return fmt.Errorf("failed to get count of devices: %w", err)
+	}
+
+	for i := uint32(0); i < count; i++ {
+		var device *wca.IMMDevice
+		if err := deviceCollection.Item(i, &device); err != nil {
+			continue
+		}
+		defer device.Release()
+
+		var id string
+		if err := device.GetId(&id); err != nil {
+			continue
+		}
+
+		if id == deviceID {
+			if err := device.Activate(wca.IID_IAudioEndpointVolume, wca.CLSCTX_ALL, nil, &audioEndpointVolume); err != nil {
+				return fmt.Errorf("failed to activate endpoint volume interface for device %s: %w", deviceID, err)
+			}
+			defer audioEndpointVolume.Release()
+
+			if err := audioEndpointVolume.SetMasterVolumeLevelScalar(volumeLevel, nil); err != nil {
+				return fmt.Errorf("failed to set volume level for device %s: %w", deviceID, err)
+			}
+			break
+		}
+	}
+
+	return nil
+}
+
+func GetVolume(deviceID string) (float32, error) {
+	var deviceEnumerator *wca.IMMDeviceEnumerator
+	var deviceCollection *wca.IMMDeviceCollection
+	var audioEndpointVolume *wca.IAudioEndpointVolume
+
+	if err := ole.CoInitializeEx(0, ole.COINIT_MULTITHREADED); err != nil {
+		return 0, fmt.Errorf("failed to initialize COM library: %w", err)
+	}
+	defer ole.CoUninitialize()
+
+	if err := wca.CoCreateInstance(wca.CLSID_MMDeviceEnumerator, 0, wca.CLSCTX_ALL, wca.IID_IMMDeviceEnumerator, &deviceEnumerator); err != nil {
+		return 0, fmt.Errorf("failed to create device enumerator instance: %w", err)
+	}
+	defer deviceEnumerator.Release()
+
+	if err := deviceEnumerator.EnumAudioEndpoints(wca.ERender, wca.DEVICE_STATE_ACTIVE, &deviceCollection); err != nil {
+		return 0, fmt.Errorf("failed to enumerate audio endpoints: %w", err)
+	}
+	defer deviceCollection.Release()
+
+	var count uint32
+	if err := deviceCollection.GetCount(&count); err != nil {
+		return 0, fmt.Errorf("failed to get count of devices: %w", err)
+	}
+
+	for i := uint32(0); i < count; i++ {
+		var device *wca.IMMDevice
+		if err := deviceCollection.Item(i, &device); err != nil {
+			continue
+		}
+		defer device.Release()
+
+		var id string
+		if err := device.GetId(&id); err != nil {
+			continue
+		}
+
+		if id == deviceID {
+			if err := device.Activate(wca.IID_IAudioEndpointVolume, wca.CLSCTX_ALL, nil, &audioEndpointVolume); err != nil {
+				return 0, fmt.Errorf("failed to activate endpoint volume interface for device %s: %w", deviceID, err)
+			}
+			defer audioEndpointVolume.Release()
+
+			var currentVolume float32
+			if err := audioEndpointVolume.GetMasterVolumeLevelScalar(&currentVolume); err != nil {
+				return 0, fmt.Errorf("failed to get volume level for device %s: %w", deviceID, err)
+			}
+			return currentVolume, nil
+		}
+	}
+
+	return 0, fmt.Errorf("device not found")
+}
