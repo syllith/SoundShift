@@ -144,7 +144,9 @@ func updateDevices() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		go renderButtons()
+		if !configWindowOpen { // Only update if the config window is not open
+			go renderButtons()
+		}
 	}
 }
 
