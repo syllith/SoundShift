@@ -104,11 +104,6 @@ func SetVolume(deviceID string, volumeLevel float32) error {
 	var deviceCollection *wca.IMMDeviceCollection
 	var audioEndpointVolume *wca.IAudioEndpointVolume
 
-	if err := ole.CoInitializeEx(0, ole.COINIT_MULTITHREADED); err != nil {
-		return fmt.Errorf("failed to initialize COM library: %w", err)
-	}
-	defer ole.CoUninitialize()
-
 	if err := wca.CoCreateInstance(wca.CLSID_MMDeviceEnumerator, 0, wca.CLSCTX_ALL, wca.IID_IMMDeviceEnumerator, &deviceEnumerator); err != nil {
 		return fmt.Errorf("failed to create device enumerator instance: %w", err)
 	}
@@ -156,11 +151,6 @@ func GetVolume(deviceID string) (float32, error) {
 	var deviceEnumerator *wca.IMMDeviceEnumerator
 	var deviceCollection *wca.IMMDeviceCollection
 	var audioEndpointVolume *wca.IAudioEndpointVolume
-
-	if err := ole.CoInitializeEx(0, ole.COINIT_MULTITHREADED); err != nil {
-		return 0, fmt.Errorf("failed to initialize COM library: %w", err)
-	}
-	defer ole.CoUninitialize()
 
 	if err := wca.CoCreateInstance(wca.CLSID_MMDeviceEnumerator, 0, wca.CLSCTX_ALL, wca.IID_IMMDeviceEnumerator, &deviceEnumerator); err != nil {
 		return 0, fmt.Errorf("failed to create device enumerator instance: %w", err)
