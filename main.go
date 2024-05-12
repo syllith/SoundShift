@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"image/color"
 	"os"
+	"reflect"
 	"soundshift/colormap"
 	"soundshift/file"
 	"soundshift/fyneCustom"
@@ -32,6 +33,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
+// . Structs
 type DeviceConfig struct {
 	Name         string
 	IsShown      bool
@@ -43,13 +45,14 @@ type AppSettings struct {
 	DeviceNames        map[string]DeviceConfig
 }
 
+// . Globals
 var initialized = false
 var configWindowOpen = false
 var settings AppSettings
 var lastInteractionTime time.Time
 var debounceDuration = 100 * time.Millisecond
 var currentDeviceID string
-
+var audioDevices []mmDeviceEnumerator.AudioDevice
 var screenWidth = int(win.GetSystemMetrics(win.SM_CXSCREEN))
 var screenHeight = int(win.GetSystemMetrics(win.SM_CYSCREEN))
 var taskbarHeight = winapi.GetTaskbarHeight()
@@ -61,157 +64,151 @@ var App fyne.App = app.NewWithID(title)
 var Win fyne.Window = App.NewWindow(title)
 var configWin fyne.Window = App.NewWindow("Configure")
 
+// * Device vbox
 var deviceVbox = container.New(&fyneCustom.CustomVBoxLayout{FixedWidth: 150})
+
+// * Main view
 var mainView = container.NewCenter(
 	container.NewPadded(
 		container.NewVBox(
 			deviceVbox,
 			&canvas.Line{StrokeColor: colormap.Gray, StrokeWidth: 1},
-			configureButton,
+			configButton,
+			&canvas.Text{Text: "", TextSize: 10},
 			container.NewPadded(volumeSlider),
 		),
 	),
 )
 
-var configureButton = &widget.Button{Text: "Configure"}
+// * Config button
+var configButton = &widget.Button{Text: "Configure"}
 
+// * Volume slider
 var volumeSlider = &widget.Slider{
 	Min:   0,
 	Max:   100,
 	Value: 0,
 }
 
+// . Initialization
 func init() {
+	//* Voume slider on changed
 	volumeSlider.OnChanged = func(f float64) {
-		// Convert the slider value (0 to 100) to a scalar (0.0 to 1.0)
 		volumeScalar := float32(f / 100.0)
 		if currentDeviceID != "" {
 			if err := policyConfig.SetVolume(currentDeviceID, volumeScalar); err != nil {
 				fmt.Println("Error setting volume:", err)
+				general.LogError("Error setting volume:", err)
 			}
 		}
 	}
 
-	configureButton.OnTapped = func() {
-		configureButton.Disable()
-		configWindowOpen = true
-
-		if configWin != nil {
-			configWin.Close()
+	configWin = fyne.CurrentApp().NewWindow("Configure")
+	configButton.OnTapped = func() {
+		if !configWindowOpen {
+			configWin.Show()
+			configWin.CenterOnScreen()
+			configWindowOpen = true
+			configButton.Disable()
 		}
-
-		configWin = App.NewWindow("Configure")
-		configWin.SetIcon(fyne.NewStaticResource("icon", icon))
-		configWin.SetContent(genConfigForm())
-		configWin.Resize(fyne.NewSize(600, 500))
-		configWin.SetOnClosed(func() {
-			configureButton.Enable()
-			configWindowOpen = false
-		})
-		configWin.CenterOnScreen()
-		configWin.Show()
 	}
-	configureButton.Refresh()
+	configWin.SetCloseIntercept(func() {
+		configWin.Hide()
+		configWindowOpen = false
+		configButton.Enable()
+	})
 }
 
+// . Main
 func main() {
 	if general.IsProcRunning(title) {
 		//! SoundShift is already running, exit
 		os.Exit(0)
 	}
 
-	// Initialize COM at the start of the application
+	//* Load audio device settings
+	loadSettings()
+
+	//* Initialize COM library
 	if err := ole.CoInitializeEx(0, ole.COINIT_MULTITHREADED); err != nil {
 		fmt.Println("Failed to initialize COM library:", err)
 		return
 	}
 	defer ole.CoUninitialize()
 
-	Win.SetContent(mainView)
-	Win.SetTitle(title)
-	Win.SetIcon(fyne.NewStaticResource("icon", icon))
-	configWin.SetIcon(fyne.NewStaticResource("icon", icon))
-	Win.Resize(fyne.NewSize(250, 300))
-	Win.SetFixedSize(true)
-	Win.SetCloseIntercept(func() {
-		winapi.HideWindow(title)
-	})
+	//* Configure application
 	App.Settings().SetTheme(fyneTheme.CustomTheme{})
 	App.Lifecycle().SetOnEnteredForeground(func() {
 		if !initialized {
+			//* Setup window
 			winapi.HideWindow(title)
 			winapi.HideMinMaxButtons(title)
 			winapi.HideWindowFromTaskbar(title)
 			winapi.SetTopmost(title)
 
+			//* Relocate window
 			size := Win.Canvas().Size()
 			winapi.MoveWindow(title, int32(screenWidth-int(size.Width)-20), int32(screenHeight-int(size.Height)-45-taskbarHeight), int32(size.Width), int32(size.Height))
 			initialized = true
 		}
 	})
 
-	loadSettings()
-	renderButtons()
+	//* Configure main window
+	Win.SetContent(mainView)
+	Win.SetTitle(title)
+	Win.SetIcon(fyne.NewStaticResource("icon", icon))
+	Win.Resize(fyne.NewSize(250, 300))
+	Win.SetFixedSize(true)
+	Win.SetCloseIntercept(func() {
+		winapi.HideWindow(title)
+	})
+
+	//* Configure config window
+	configWin.SetIcon(fyne.NewStaticResource("icon", icon))
+	configWin.SetContent(genConfigForm())
+	configWin.Resize(fyne.NewSize(600, 500))
+	configWin.SetOnClosed(func() {
+		configButton.Enable()
+		configWindowOpen = false
+	})
+
 	go hideOnClick()
 	go updateDevices()
 	go systray.Run(initTray, func() {})
 	Win.ShowAndRun()
 }
 
-func updateDevices() {
-	ticker := time.NewTicker(3 * time.Second)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		if !configWindowOpen { // Only update if the config window is not open
-			go renderButtons()
-		}
-	}
-}
-
-func hideOnClick() {
-	mouseChan := make(chan types.MouseEvent)
-	mouse.Install(nil, mouseChan)
-	defer mouse.Uninstall()
-
-	for k := range mouseChan {
-		if k.Message == 513 {
-			if !isMouseInWindow() && !isMouseInTaskbar() && !configWindowOpen {
-				lastInteractionTime = time.Now()
-				go debounceHideWindow()
-			}
-		}
-	}
-}
-
-func debounceHideWindow() {
-	time.Sleep(debounceDuration)
-	if time.Since(lastInteractionTime) >= debounceDuration && winapi.IsWindowVisible(title) {
-		winapi.HideWindow(title)
-	}
-}
-
-func isMouseInWindow() bool {
-	xMouse, yMouse := robotgo.Location()
-	xPos, yPos, _ := winapi.GetWindowPosition(title)
-	xSize, ySize, _ := winapi.GetWindowSize(title)
-	return int(xMouse) >= int(xPos) && int(xMouse) <= int(xPos+xSize) && int(yMouse) >= int(yPos) && int(yMouse) <= int(yPos+ySize)
-}
-
-func isMouseInTaskbar() bool {
-	_, yMouse := robotgo.Location()
-	return screenHeight-yMouse <= winapi.GetTaskbarHeight()
-}
-
-func renderButtons() {
-	//* Get audio devices
-	audioDevices, err := mmDeviceEnumerator.GetDevices()
-	if err != nil || audioDevices == nil {
+// . Check and update audio devices
+func checkAndUpdateDevices() {
+	newAudioDevices, err := mmDeviceEnumerator.GetDevices()
+	if err != nil || newAudioDevices == nil {
 		fmt.Println("Error getting audio devices:", err)
 		general.LogError("Error getting audio devices:", err)
 		return
 	}
 
+	if !slicesEqual(audioDevices, newAudioDevices) && !configWindowOpen {
+		//. Audio devices changed
+		fmt.Println("Devices changed")
+		audioDevices = newAudioDevices
+		go renderButtons()
+	}
+}
+
+// . Loop to update audio devices
+func updateDevices() {
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+
+	checkAndUpdateDevices()
+
+	for range ticker.C {
+		checkAndUpdateDevices()
+	}
+}
+
+// . Render audio device buttons
+func renderButtons() {
 	//* Reset deviceVbox
 	deviceVbox.Objects = nil
 
@@ -221,7 +218,7 @@ func renderButtons() {
 		device := audioDevices[i]
 		config, exists := settings.DeviceNames[device.Id]
 		if !exists {
-			//. Config did not exist, creating a new one
+			//. Config did not exist, using default
 			config = DeviceConfig{Name: device.Name, IsShown: true}
 		}
 
@@ -235,6 +232,7 @@ func renderButtons() {
 
 		//* Create button tapped function
 		onTapped := func() {
+			//* Set default audio device
 			err := policyConfig.SetDefaultEndPoint(device.Id)
 			if err != nil {
 				fmt.Println("Error setting default endpoint:", err)
@@ -242,12 +240,25 @@ func renderButtons() {
 				return
 			}
 
-			go renderButtons()
+			//* Hide window if setting is enabled
 			if settings.HideAfterSelection {
 				winapi.HideWindow(title)
 			}
+
+			// * Update buttons to reflect new default device
+			for i := range audioDevices {
+				if audioDevices[i].Id == device.Id {
+					audioDevices[i].IsDefault = true
+				} else {
+					audioDevices[i].IsDefault = false
+				}
+			}
+
+			deviceVbox.Refresh()
+			go renderButtons()
 		}
 
+		//* Add button to deviceVbox
 		if device.IsDefault {
 			//* Add default audio device button
 			deviceVbox.Add(widget.NewButtonWithIcon(deviceName, theme.VolumeUpIcon(), onTapped))
@@ -264,12 +275,7 @@ func renderButtons() {
 		}
 	}
 
-	//* Update configure button state
-	if configWindowOpen {
-		configureButton.Disable()
-		configWin.SetContent(genConfigForm())
-	}
-
+	//* Refresh device buttons
 	for i := range deviceVbox.Objects {
 		deviceVbox.Objects[i].Refresh()
 	}
@@ -303,12 +309,14 @@ func loadSettings() {
 	}
 }
 
+// . Save settings to file
 func saveSettings() {
 	fileData, _ := json.MarshalIndent(settings, "", "    ")
 	os.MkdirAll(file.RoamingDir()+"/soundshift", os.ModePerm)
 	os.WriteFile(file.RoamingDir()+"/soundshift/settings.json", fileData, 0644)
 }
 
+// . Generate configuration form
 func genConfigForm() fyne.CanvasObject {
 	//* Get audio devices
 	audioDevices, err := mmDeviceEnumerator.GetDevices()
@@ -394,7 +402,9 @@ func genConfigForm() fyne.CanvasObject {
 		}
 
 		saveSettings()
-		configWin.Close()
+		configWin.Hide()
+		configWindowOpen = false
+		configButton.Enable()
 		go renderButtons()
 	})
 
@@ -425,4 +435,54 @@ func initTray() {
 	mQuit.Click(func() {
 		os.Exit(0)
 	})
+}
+
+func hideOnClick() {
+	mouseChan := make(chan types.MouseEvent)
+	mouse.Install(nil, mouseChan)
+	defer mouse.Uninstall()
+
+	for k := range mouseChan {
+		if k.Message == 513 {
+			if !isMouseInWindow() && !isMouseInTaskbar() && !configWindowOpen {
+				lastInteractionTime = time.Now()
+				go debounceHideWindow()
+			}
+		}
+	}
+}
+
+func debounceHideWindow() {
+	time.Sleep(debounceDuration)
+	if time.Since(lastInteractionTime) >= debounceDuration && winapi.IsWindowVisible(title) {
+		winapi.HideWindow(title)
+	}
+}
+
+func isMouseInWindow() bool {
+	xMouse, yMouse := robotgo.Location()
+	xPos, yPos, _ := winapi.GetWindowPosition(title)
+	xSize, ySize, _ := winapi.GetWindowSize(title)
+	return int(xMouse) >= int(xPos) && int(xMouse) <= int(xPos+xSize) && int(yMouse) >= int(yPos) && int(yMouse) <= int(yPos+ySize)
+}
+
+func isMouseInTaskbar() bool {
+	_, yMouse := robotgo.Location()
+	return screenHeight-yMouse <= winapi.GetTaskbarHeight()
+}
+
+func slicesEqual(a, b interface{}) bool {
+	va, vb := reflect.ValueOf(a), reflect.ValueOf(b)
+	if va.Kind() != reflect.Slice || vb.Kind() != reflect.Slice {
+		return false // Ensures the provided interfaces are slices.
+	}
+	if va.Len() != vb.Len() {
+		return false // Slices of different lengths are not equal.
+	}
+	for i := 0; i < va.Len(); i++ {
+		if !reflect.DeepEqual(va.Index(i).Interface(), vb.Index(i).Interface()) {
+			return false // Uses deep comparison for each element.
+		}
+	}
+	return true
 }
