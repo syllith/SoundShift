@@ -58,6 +58,7 @@ var screenWidth = int(win.GetSystemMetrics(win.SM_CXSCREEN))
 var screenHeight = int(win.GetSystemMetrics(win.SM_CYSCREEN))
 var taskbarHeight = winapi.GetTaskbarHeight()
 var hwnd windows.HWND
+var deviceVboxPlaceholder = container.New(&fyneCustom.CustomVBoxLayout{FixedWidth: 150})
 
 //go:embed speaker.ico
 var icon []byte
@@ -73,7 +74,7 @@ var deviceVbox = container.New(&fyneCustom.CustomVBoxLayout{FixedWidth: 150})
 var mainView = container.NewPadded(
 	container.NewCenter(
 		container.NewVBox(
-			deviceVbox,
+			deviceVboxPlaceholder,
 			&canvas.Line{StrokeColor: colormap.Gray, StrokeWidth: 1},
 			configButton,
 			&canvas.Text{Text: "", TextSize: 10},
@@ -122,17 +123,9 @@ func init() {
 }
 
 func resize() {
-	//time.Sleep(1000 * time.Millisecond)
 	size := Win.Content().MinSize()
-	//fmt.Println(Win.Content().MinSize())
 	winapi.MoveWindow(hwnd, int32(screenWidth-int(size.Width)-20), int32(screenHeight-int(size.Height)-60-taskbarHeight), int32(size.Width), int32(size.Height))
-	// log all important values
-	fmt.Println("screenWidth:", screenWidth)
-	fmt.Println("screenHeight:", screenHeight)
-	fmt.Println("taskbarHeight:", taskbarHeight)
-	fmt.Println("size.Width:", size.Width)
-	fmt.Println("size.Height:", size.Height)
-	fmt.Println("hwnd:", hwnd)
+	fmt.Println("Resized window")
 }
 
 // . main initializes the application, sets up the UI and systray, and manages application lifecycle events.
@@ -253,8 +246,8 @@ func updateDevices() {
 
 // . renderButtons dynamically creates and updates buttons for each audio device in the UI
 func renderButtons() {
-	//* Clear existing buttons from the deviceVbox container
-	deviceVbox.RemoveAll()
+	//* Create a new container for device buttons
+	newDeviceVbox := container.New(&fyneCustom.CustomVBoxLayout{FixedWidth: 150})
 
 	//* Create a button for each audio device
 	for _, device := range audioDevices {
@@ -298,9 +291,9 @@ func renderButtons() {
 			}
 		}(device.Id)
 
-		//* Add button for the device to deviceVbox
+		//* Add button for the device to newDeviceVbox
 		if device.IsDefault {
-			deviceVbox.Add(widget.NewButtonWithIcon(deviceName, theme.VolumeUpIcon(), onTapped))
+			newDeviceVbox.Add(widget.NewButtonWithIcon(deviceName, theme.VolumeUpIcon(), onTapped))
 			currentDeviceID = device.Id
 
 			//* Set volume slider to the current volume of the default device
@@ -319,9 +312,16 @@ func renderButtons() {
 				volumeSlider.SetValue(0) // Set slider to 0 if muted
 			}
 		} else {
-			deviceVbox.Add(widget.NewButton(deviceName, onTapped))
+			newDeviceVbox.Add(widget.NewButton(deviceName, onTapped))
 		}
 	}
+
+	//* Refresh the container only once after adding all buttons
+	newDeviceVbox.Refresh()
+
+	//* Replace the old deviceVbox with the new one
+	deviceVboxPlaceholder.Objects = []fyne.CanvasObject{newDeviceVbox}
+	deviceVboxPlaceholder.Refresh()
 }
 
 // . loadSettings loads application settings from a JSON file, initializing defaults if the file doesn't exist
@@ -511,6 +511,7 @@ func genConfigForm() fyne.CanvasObject {
 
 		//* Refresh the main UI to reflect updated settings
 		renderButtons()
+		time.Sleep(100 * time.Millisecond)
 		resize()
 	})
 
@@ -546,7 +547,7 @@ func initTray() {
 			winapi.HideWindow(hwnd)
 		} else {
 			//* Show and reposition the window if it is hidden
-			//resize()
+			//TODO: Add setting to determine if window should resize back to its initial position, or stay where it was at last
 			winapi.ShowWindow(hwnd)
 			winapi.SetTopmost(hwnd)
 		}
