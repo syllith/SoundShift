@@ -49,11 +49,6 @@ func SetDefaultEndPoint(deviceId string) error {
 		return fmt.Errorf("invalid device ID provided")
 	}
 
-	// if err := ole.CoInitializeEx(0, ole.COINIT_MULTITHREADED); err != nil {
-	// 	return fmt.Errorf("failed to initialize COM library: %w", err)
-	// }
-	// defer ole.CoUninitialize()
-
 	CPolicyConfigClientUID := ole.NewGUID("870AF99C-171D-4F9E-AF0D-E63DF40C2BC9")
 	IPolicyConfigUID := ole.NewGUID("F8679F50-850A-41CF-9C72-430F290290C8")
 

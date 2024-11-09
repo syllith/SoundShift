@@ -122,15 +122,15 @@ func main() {
 		os.Exit(0)
 	}
 
-	//* Load audio device settings
-	loadSettings()
-
 	//* Initialize COM library
 	if err := ole.CoInitializeEx(0, ole.COINIT_MULTITHREADED); err != nil {
 		fmt.Println("Failed to initialize COM library:", err)
 		return
 	}
 	defer ole.CoUninitialize()
+
+	//* Load audio device settings
+	loadSettings()
 
 	//* Configure application
 	App.Settings().SetTheme(fyneTheme.CustomTheme{})
@@ -183,10 +183,12 @@ func checkAndUpdateDevices() {
 		return
 	}
 
+	// Check if devices have changed
 	if !slicesEqual(audioDevices, newAudioDevices) && !configWindowOpen {
-		//. Audio devices changed
+		// Audio devices changed
 		audioDevices = newAudioDevices
-		go renderButtons()
+		loadSettings()     // Reload settings to handle ID changes
+		go renderButtons() // Re-render buttons based on updated settings
 	}
 }
 
@@ -195,67 +197,69 @@ func updateDevices() {
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 
-	checkAndUpdateDevices()
-
-	for range ticker.C {
-		checkAndUpdateDevices()
+	for {
+		select {
+		case <-ticker.C:
+			checkAndUpdateDevices()
+		}
 	}
 }
 
 // . Render audio device buttons
 func renderButtons() {
-	//* Reset deviceVbox
+	// Reset deviceVbox
 	deviceVbox.Objects = nil
 
-	//* Create button for each audio device
-	for i := range audioDevices {
-		//* Get device config
-		device := audioDevices[i]
+	// Create button for each audio device
+	for _, device := range audioDevices {
+		// Get device config
 		config, exists := settings.DeviceNames[device.Id]
 		if !exists {
-			//. Config did not exist, using default
-			config = DeviceConfig{Name: device.Name, IsShown: true}
+			// Config did not exist, using default
+			config = DeviceConfig{Name: device.Name, IsShown: true, OriginalName: device.Name}
 		}
 
 		if !config.IsShown {
-			//! Device is hidden, skip button creation
+			// Device is hidden, skip button creation
 			continue
 		}
 
-		//* Get device name
+		// Get device name
 		deviceName := general.EllipticalTruncate(config.Name, 15)
 
-		//* Create button tapped function
-		onTapped := func() {
-			//* Set default audio device
-			err := policyConfig.SetDefaultEndPoint(device.Id)
-			if err != nil {
-				fmt.Println("Error setting default endpoint:", err)
-				general.LogError("Error setting default endpoint:", err)
-				return
-			}
-
-			//* Hide window if setting is enabled
-			if settings.HideAfterSelection {
-				winapi.HideWindow(title)
-			}
-
-			// * Update buttons to reflect new default device
-			for i := range audioDevices {
-				if audioDevices[i].Id == device.Id {
-					audioDevices[i].IsDefault = true
-				} else {
-					audioDevices[i].IsDefault = false
+		// Create button tapped function
+		onTapped := func(deviceID string) func() {
+			return func() {
+				// Set default audio device
+				err := policyConfig.SetDefaultEndPoint(deviceID)
+				if err != nil {
+					fmt.Println("Error setting default endpoint:", err)
+					general.LogError("Error setting default endpoint:", err)
+					return
 				}
+
+				// Hide window if setting is enabled
+				if settings.HideAfterSelection {
+					winapi.HideWindow(title)
+				}
+
+				// Update buttons to reflect new default device
+				for i := range audioDevices {
+					if audioDevices[i].Id == deviceID {
+						audioDevices[i].IsDefault = true
+					} else {
+						audioDevices[i].IsDefault = false
+					}
+				}
+
+				deviceVbox.Refresh()
+				go renderButtons()
 			}
+		}(device.Id) // Capture the current device.Id
 
-			deviceVbox.Refresh()
-			go renderButtons()
-		}
-
-		//* Add button to deviceVbox
+		// Add button to deviceVbox
 		if device.IsDefault {
-			//* Add default audio device button
+			// Add default audio device button
 			deviceVbox.Add(widget.NewButtonWithIcon(deviceName, theme.VolumeUpIcon(), onTapped))
 			currentDeviceID = device.Id
 			volume, err := policyConfig.GetVolume(currentDeviceID)
@@ -265,43 +269,90 @@ func renderButtons() {
 				volumeSlider.SetValue(float64(volume * 100)) // Convert volume scalar to percentage
 			}
 		} else {
-			//* Add non-default audio device button
-			deviceVbox.Add(&widget.Button{Text: deviceName, OnTapped: onTapped})
+			// Add non-default audio device button
+			deviceVbox.Add(widget.NewButton(deviceName, onTapped))
 		}
 	}
 
-	//* Refresh device buttons
-	for i := range deviceVbox.Objects {
-		deviceVbox.Objects[i].Refresh()
+	// Refresh device buttons
+	for _, obj := range deviceVbox.Objects {
+		if button, ok := obj.(*widget.Button); ok {
+			button.Refresh()
+		}
 	}
 }
 
 func loadSettings() {
 	settingsPath := file.RoamingDir() + "/soundshift/settings.json"
 
-	//* Initialize settings with default values
+	// Initialize settings with default values
 	settings = AppSettings{
 		HideAfterSelection: false,
 		DeviceNames:        make(map[string]DeviceConfig),
 	}
 
-	//* Read settings file
+	// Read settings file
 	fileData, err := os.ReadFile(settingsPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			//. Settings file does not exist, creating a new one
+			// Settings file does not exist, create a new one
 			saveSettings()
 		}
 		return
 	}
 
-	//* Parse settings from file data
+	// Parse settings from file data
 	json.Unmarshal(fileData, &settings)
 
-	//* Ensure DeviceNames is initialized
+	// Ensure DeviceNames is initialized
 	if settings.DeviceNames == nil {
 		settings.DeviceNames = make(map[string]DeviceConfig)
 	}
+
+	// Build a reverse map from OriginalName to DeviceConfig
+	originalNameToConfig := make(map[string]string) // OriginalName -> Device ID
+	for id, config := range settings.DeviceNames {
+		originalNameToConfig[config.OriginalName] = id
+	}
+
+	// Get current devices
+	currentDevices, err := mmDeviceEnumerator.GetDevices()
+	if err != nil {
+		fmt.Println("Error getting current devices:", err)
+		general.LogError("Error getting current devices:", err)
+		return
+	}
+
+	// Temporary map to hold updated DeviceNames
+	updatedDeviceNames := make(map[string]DeviceConfig)
+
+	for _, device := range currentDevices {
+		config, exists := settings.DeviceNames[device.Id]
+		if !exists {
+			// Check if a config exists with the same OriginalName
+			if oldID, found := originalNameToConfig[device.Name]; found {
+				// Update the config with the new ID
+				config = settings.DeviceNames[oldID]
+				updatedDeviceNames[device.Id] = config
+				delete(settings.DeviceNames, oldID) // Remove old ID entry
+				fmt.Printf("Updated device ID for %s from %s to %s\n", device.Name, oldID, device.Id)
+			} else {
+				// Config did not exist, use default
+				config = DeviceConfig{
+					Name:         device.Name,
+					IsShown:      true,
+					OriginalName: device.Name,
+				}
+				updatedDeviceNames[device.Id] = config
+			}
+		} else {
+			// Device ID exists in settings
+			updatedDeviceNames[device.Id] = config
+		}
+	}
+
+	// Assign the updated map back to settings
+	settings.DeviceNames = updatedDeviceNames
 }
 
 // . Save settings to file
