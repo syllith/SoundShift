@@ -84,11 +84,7 @@ var mainView = container.NewCenter(
 var configButton = &widget.Button{Text: "Configure"}
 
 // * Volume slider
-var volumeSlider = &widget.Slider{
-	Min:   0,
-	Max:   100,
-	Value: 0,
-}
+var volumeSlider = fyneCustom.NewScrollableSlider(0, 100)
 
 // . Initialization
 func init() {
@@ -189,7 +185,6 @@ func checkAndUpdateDevices() {
 
 	if !slicesEqual(audioDevices, newAudioDevices) && !configWindowOpen {
 		//. Audio devices changed
-		fmt.Println("Devices changed")
 		audioDevices = newAudioDevices
 		go renderButtons()
 	}

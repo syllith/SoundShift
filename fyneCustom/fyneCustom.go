@@ -5,10 +5,48 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
+	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
 
+// * Custom Scrollable Slider
+type ScrollableSlider struct {
+	widget.Slider
+}
+
+func NewScrollableSlider(min, max float64) *ScrollableSlider {
+	s := &ScrollableSlider{}
+	s.Min = min
+	s.Max = max
+	s.ExtendBaseWidget(s)
+	return s
+}
+
+func (s *ScrollableSlider) Scrolled(ev *fyne.ScrollEvent) {
+	increment := (s.Max - s.Min) / 20 // Adjust increment as needed
+	if ev.Scrolled.DY > 0 {
+		s.Value += increment
+	} else if ev.Scrolled.DY < 0 {
+		s.Value -= increment
+	}
+	if s.Value > s.Max {
+		s.Value = s.Max
+	} else if s.Value < s.Min {
+		s.Value = s.Min
+	}
+	s.Refresh()
+	if s.OnChanged != nil {
+		s.OnChanged(s.Value)
+	}
+}
+
+// Required to satisfy the desktop.Hoverable interface
+func (s *ScrollableSlider) MouseIn(*desktop.MouseEvent)    {}
+func (s *ScrollableSlider) MouseMoved(*desktop.MouseEvent) {}
+func (s *ScrollableSlider) MouseOut()                      {}
+
+// * ColorButton
 type ColorButton struct {
 	widget.Button
 	backgroundColor color.Color
@@ -71,7 +109,7 @@ func (r *colorButtonRenderer) BackgroundColor() color.Color {
 	return r.button.backgroundColor
 }
 
-// ! Form
+// * Custom VBox Layout
 type CustomVBoxLayout struct {
 	FixedWidth float32
 }
