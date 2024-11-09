@@ -246,3 +246,59 @@ func GetVolume(deviceID string) (float32, error) {
 	//! Return an error if the specified deviceID is not found
 	return 0, fmt.Errorf("device not found")
 }
+
+func GetMute(deviceID string) (bool, error) {
+	var deviceEnumerator *wca.IMMDeviceEnumerator
+	var deviceCollection *wca.IMMDeviceCollection
+	var audioEndpointVolume *wca.IAudioEndpointVolume
+
+	// Create device enumerator.
+	if err := wca.CoCreateInstance(wca.CLSID_MMDeviceEnumerator, 0, wca.CLSCTX_ALL, wca.IID_IMMDeviceEnumerator, &deviceEnumerator); err != nil {
+		return false, fmt.Errorf("failed to create device enumerator instance: %w", err)
+	}
+	defer deviceEnumerator.Release()
+
+	// Enumerate active render devices.
+	if err := deviceEnumerator.EnumAudioEndpoints(wca.ERender, wca.DEVICE_STATE_ACTIVE, &deviceCollection); err != nil {
+		return false, fmt.Errorf("failed to enumerate audio endpoints: %w", err)
+	}
+	defer deviceCollection.Release()
+
+	// Get device count.
+	var count uint32
+	if err := deviceCollection.GetCount(&count); err != nil {
+		return false, fmt.Errorf("failed to get count of devices: %w", err)
+	}
+
+	// Iterate through devices to find the matching device ID.
+	for i := uint32(0); i < count; i++ {
+		var device *wca.IMMDevice
+		if err := deviceCollection.Item(i, &device); err != nil {
+			continue
+		}
+		defer device.Release()
+
+		var id string
+		if err := device.GetId(&id); err != nil {
+			continue
+		}
+
+		if id == deviceID {
+			// Activate the IAudioEndpointVolume interface.
+			if err := device.Activate(wca.IID_IAudioEndpointVolume, wca.CLSCTX_ALL, nil, &audioEndpointVolume); err != nil {
+				return false, fmt.Errorf("failed to activate endpoint volume interface for device %s: %w", deviceID, err)
+			}
+			defer audioEndpointVolume.Release()
+
+			// Retrieve the mute state.
+			var isMuted bool
+			if err := audioEndpointVolume.GetMute(&isMuted); err != nil {
+				return false, fmt.Errorf("failed to get mute state for device %s: %w", deviceID, err)
+			}
+
+			return isMuted, nil
+		}
+	}
+
+	return false, fmt.Errorf("device with ID %s not found", deviceID)
+}

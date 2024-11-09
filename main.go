@@ -61,7 +61,7 @@ var hwnd windows.HWND
 
 //go:embed speaker.ico
 var icon []byte
-var title = "SoundShift "
+var title = "SoundShift "
 var App fyne.App = app.NewWithID(title)
 var Win fyne.Window = App.NewWindow(title)
 var configWin fyne.Window = App.NewWindow("Configure")
@@ -194,6 +194,7 @@ func main() {
 	//* Start background goroutines for handling clicks and device updates
 	go hideOnClick()
 	go updateDevices()
+	go monitorDeviceChanges()
 
 	//* Show the main window and start the application event loop
 	Win.ShowAndRun()
@@ -221,10 +222,14 @@ func checkAndUpdateDevices() {
 
 // . updateDevices continuously checks for audio device changes at regular intervals
 func updateDevices() {
+	// Initial check for devices to load them immediately on startup
+	checkAndUpdateDevices()
+
+	// Set up the ticker for subsequent device updates
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 
-	//* Loop to periodically check for audio device updates
+	// Periodically check for audio device updates
 	for {
 		select {
 		case <-ticker.C:
@@ -234,6 +239,7 @@ func updateDevices() {
 }
 
 // . renderButtons dynamically creates and updates buttons for each audio device in the UI
+
 func renderButtons() {
 	//* Clear existing buttons from the deviceVbox container
 	deviceVbox.Objects = nil
@@ -265,17 +271,18 @@ func renderButtons() {
 					return
 				}
 
-				//* Hide the window after selection if the setting is enabled
-				if settings.HideAfterSelection {
-					winapi.HideWindow(hwnd)
-				}
-
 				//* Update the default status for each device in the list
 				for i := range audioDevices {
 					audioDevices[i].IsDefault = (audioDevices[i].Id == deviceID)
 				}
-				//* Call renderButtons only once here
+
+				//* Re-render buttons to update UI
 				renderButtons()
+
+				//* Hide the main window after selection if the option is enabled
+				if settings.HideAfterSelection {
+					winapi.HideWindow(hwnd)
+				}
 			}
 		}(device.Id)
 
@@ -290,6 +297,14 @@ func renderButtons() {
 				fmt.Println("Error getting volume:", err)
 			} else {
 				volumeSlider.SetValue(float64(volume * 100)) // Convert volume scalar to percentage
+			}
+
+			//* Check if the device is muted and update the volume slider accordingly
+			muted, err := policyConfig.GetMute(currentDeviceID)
+			if err != nil {
+				fmt.Println("Error getting mute state:", err)
+			} else if muted {
+				volumeSlider.SetValue(0) // Set slider to 0 if muted
 			}
 		} else {
 			deviceVbox.Add(widget.NewButton(deviceName, onTapped))
@@ -476,6 +491,9 @@ func genConfigForm() fyne.CanvasObject {
 			}
 		}
 
+		//* Update hide-after-selection setting
+		settings.HideAfterSelection = hideAfterSelectionCheckbox.Checked
+
 		//* Save settings to file and close the configuration window
 		saveSettings()
 		configWin.Hide()
@@ -599,4 +617,33 @@ func slicesEqual(a, b interface{}) bool {
 		}
 	}
 	return true // All elements are equal
+}
+
+func monitorDeviceChanges() {
+	ticker := time.NewTicker(500 * time.Millisecond) // Poll every 500 ms
+	defer ticker.Stop()
+
+	for {
+		<-ticker.C
+		if currentDeviceID != "" {
+			// Retrieve current volume and mute state
+			volume, err := policyConfig.GetVolume(currentDeviceID)
+			if err != nil {
+				fmt.Println("Error getting volume:", err)
+				continue
+			}
+
+			muted, err := policyConfig.GetMute(currentDeviceID)
+			if err != nil {
+				fmt.Println("Error getting mute state:", err)
+				continue
+			}
+
+			if muted {
+				volumeSlider.SetValue(0) // Set slider to 0 if muted
+			} else {
+				volumeSlider.SetValue(float64(volume * 100)) // Set slider to current volume level
+			}
+		}
+	}
 }
