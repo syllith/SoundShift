@@ -158,7 +158,7 @@ func main() {
 	Win.SetTitle(title)
 	Win.SetIcon(fyne.NewStaticResource("icon", icon))
 	Win.Resize(fyne.NewSize(250, 300))
-	Win.SetFixedSize(true)
+	//Win.SetFixedSize(true)
 	Win.SetCloseIntercept(func() {
 		winapi.HideWindow(title)
 	})
@@ -228,7 +228,7 @@ func renderButtons() {
 		}
 
 		//* Get device name
-		deviceName := general.EllipticalTruncate(config.Name, 20)
+		deviceName := general.EllipticalTruncate(config.Name, 15)
 
 		//* Create button tapped function
 		onTapped := func() {
