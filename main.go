@@ -70,8 +70,8 @@ var configWin fyne.Window = App.NewWindow("Configure")
 var deviceVbox = container.New(&fyneCustom.CustomVBoxLayout{FixedWidth: 150})
 
 // * Main view layout
-var mainView = container.NewCenter(
-	container.NewPadded(
+var mainView = container.NewPadded(
+	container.NewCenter(
 		container.NewVBox(
 			deviceVbox,
 			&canvas.Line{StrokeColor: colormap.Gray, StrokeWidth: 1},
@@ -121,6 +121,20 @@ func init() {
 	})
 }
 
+func resize() {
+	//time.Sleep(1000 * time.Millisecond)
+	size := Win.Content().MinSize()
+	//fmt.Println(Win.Content().MinSize())
+	winapi.MoveWindow(hwnd, int32(screenWidth-int(size.Width)-20), int32(screenHeight-int(size.Height)-60-taskbarHeight), int32(size.Width), int32(size.Height))
+	// log all important values
+	fmt.Println("screenWidth:", screenWidth)
+	fmt.Println("screenHeight:", screenHeight)
+	fmt.Println("taskbarHeight:", taskbarHeight)
+	fmt.Println("size.Width:", size.Width)
+	fmt.Println("size.Height:", size.Height)
+	fmt.Println("hwnd:", hwnd)
+}
+
 // . main initializes the application, sets up the UI and systray, and manages application lifecycle events.
 func main() {
 	//* Exit if an instance of the application is already running
@@ -160,12 +174,10 @@ func main() {
 			winapi.HideWindowFromTaskbar(hwnd)
 			winapi.SetTopmost(hwnd)
 
-			//* Position the application window on screen
-			size := Win.Canvas().Size()
-			winapi.MoveWindow(hwnd, int32(screenWidth-int(size.Width)-20), int32(screenHeight-int(size.Height)-45-taskbarHeight), int32(size.Width), int32(size.Height))
-
 			//* Initialize the system tray icon and menu
 			go systray.Run(initTray, func() {})
+
+			resize()
 
 			initialized = true
 		}
@@ -175,7 +187,6 @@ func main() {
 	Win.SetContent(mainView)
 	Win.SetTitle(title)
 	Win.SetIcon(fyne.NewStaticResource("icon", icon))
-	Win.Resize(fyne.NewSize(250, 300))
 	Win.SetCloseIntercept(func() {
 		//* Intercept window close to hide it instead of terminating the app
 		winapi.HideWindow(hwnd)
@@ -215,8 +226,10 @@ func checkAndUpdateDevices() {
 	if !slicesEqual(audioDevices, newAudioDevices) && !configWindowOpen {
 		//* Update audio devices if changes are detected
 		audioDevices = newAudioDevices
-		loadSettings()     // Reload settings to handle device ID changes
-		go renderButtons() // Re-render device buttons based on updated device list
+		loadSettings()  // Reload settings to handle device ID changes
+		renderButtons() // Re-render device buttons based on updated device list
+		fmt.Println("Devices updated")
+		resize()
 	}
 }
 
@@ -239,10 +252,9 @@ func updateDevices() {
 }
 
 // . renderButtons dynamically creates and updates buttons for each audio device in the UI
-
 func renderButtons() {
 	//* Clear existing buttons from the deviceVbox container
-	deviceVbox.Objects = nil
+	deviceVbox.RemoveAll()
 
 	//* Create a button for each audio device
 	for _, device := range audioDevices {
@@ -310,9 +322,6 @@ func renderButtons() {
 			deviceVbox.Add(widget.NewButton(deviceName, onTapped))
 		}
 	}
-
-	//* Refresh the container only once after adding all buttons
-	deviceVbox.Refresh()
 }
 
 // . loadSettings loads application settings from a JSON file, initializing defaults if the file doesn't exist
@@ -501,7 +510,8 @@ func genConfigForm() fyne.CanvasObject {
 		configButton.Enable()
 
 		//* Refresh the main UI to reflect updated settings
-		go renderButtons()
+		renderButtons()
+		resize()
 	})
 
 	//* Layout for save button and checkboxes
@@ -536,8 +546,7 @@ func initTray() {
 			winapi.HideWindow(hwnd)
 		} else {
 			//* Show and reposition the window if it is hidden
-			size := Win.Canvas().Size()
-			winapi.MoveWindow(hwnd, int32(screenWidth-int(size.Width)-20), int32(screenHeight-int(size.Height)-45-taskbarHeight), int32(size.Width), int32(size.Height))
+			//resize()
 			winapi.ShowWindow(hwnd)
 			winapi.SetTopmost(hwnd)
 		}
