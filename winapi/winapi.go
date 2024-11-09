@@ -1,12 +1,14 @@
 package winapi
 
 import (
+	"errors"
 	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
+// Windows constants for window styles, show commands, and other properties
 const (
 	WS_MINIMIZEBOX   = 0x00020000
 	WS_CAPTION       = 0x00C00000
@@ -24,6 +26,7 @@ const (
 	SWP_NOMOVE       = 0x0002
 )
 
+// RECT defines a rectangle area used by Windows APIs for window positioning
 type RECT struct {
 	Left   int32
 	Top    int32
@@ -31,311 +34,249 @@ type RECT struct {
 	Bottom int32
 }
 
-// . Convert int to uintptr due to inline conversion being impossible with negative numbers
+// . IntToUintptr converts an integer to uintptr, needed for negative constants in Windows API calls
 func IntToUintptr(value int) uintptr {
 	return uintptr(value)
 }
 
-// . Checks if the window handle exists with the given title
-func WindowExists(title string) bool {
+// . GetHwnd finds a window handle (HWND) based on a process ID and window title
+func GetHwnd(pid uint32, title string) (windows.HWND, error) {
+	//* Load required functions from user32.dll
 	user32 := syscall.MustLoadDLL("user32.dll")
-	findWindow := user32.MustFindProc("FindWindowW")
+	enumWindows := user32.MustFindProc("EnumWindows")
+	getWindowThreadProcessId := user32.MustFindProc("GetWindowThreadProcessId")
+	getWindowTextW := user32.MustFindProc("GetWindowTextW")
+	isWindowVisible := user32.MustFindProc("IsWindowVisible")
 
-	ptr, err := syscall.UTF16PtrFromString(title)
-	if err != nil {
-		return false
+	var hwnd windows.HWND
+	found := false
+
+	//* Define the callback function for EnumWindows
+	cb := syscall.NewCallback(func(h windows.HWND, lparam uintptr) uintptr {
+		var windowPid uint32
+		//* Retrieve the process ID associated with the current window handle
+		getWindowThreadProcessId.Call(uintptr(h), uintptr(unsafe.Pointer(&windowPid)))
+		if windowPid == pid {
+			//* Get the window title text
+			buf := make([]uint16, 256)
+			getWindowTextW.Call(uintptr(h), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+			windowTitle := syscall.UTF16ToString(buf)
+
+			//* Check if the window is visible
+			ret, _, _ := isWindowVisible.Call(uintptr(h))
+			if windowTitle == title && ret != 0 {
+				//* Window matches the title and is visible; set hwnd and stop enumeration
+				hwnd = h
+				found = true
+				return 0 // Stop enumeration
+			}
+		}
+		return 1 // Continue enumeration
+	})
+
+	//* Call EnumWindows with the defined callback to enumerate all windows
+	r1, _, err := enumWindows.Call(cb, 0)
+	if r1 == 0 && !found {
+		//! Window with specified title and PID not found
+		return 0, errors.New("window not found")
 	}
 
-	hwnd, _, _ := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
-	return hwnd != 0
+	//* Handle potential errors from EnumWindows
+	if err != nil && err.Error() != "The operation completed successfully." {
+		return 0, err
+	}
+	return hwnd, nil
 }
 
-// . Hides the minimize / maximize buttons in the title bar
-func HideMinMaxButtons(title string) {
+// . HideMinMaxButtons removes the minimize and maximize buttons from the window's title bar
+func HideMinMaxButtons(hwnd windows.HWND) {
+	//* Load necessary functions from user32.dll
 	user32 := syscall.MustLoadDLL("user32.dll")
-	findWindow := user32.MustFindProc("FindWindowW")
 	getWindowLong := user32.MustFindProc("GetWindowLongPtrW")
 	setWindowLong := user32.MustFindProc("SetWindowLongPtrW")
 
-	ptr, err := syscall.UTF16PtrFromString(title)
-	if err != nil {
-		return
-	}
-
-	hwnd, _, _ := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
-	if hwnd == 0 {
-		return
-	}
-
-	style, _, _ := getWindowLong.Call(hwnd, IntToUintptr(GWL_STYLE))
+	//* Retrieve the current window style
+	style, _, _ := getWindowLong.Call(uintptr(hwnd), IntToUintptr(GWL_STYLE))
 	if style == 0 {
-		return
+		return // Return if unable to retrieve the style
 	}
 
+	//* Modify the style to remove the minimize box
 	newStyle := style &^ uintptr(WS_MINIMIZEBOX)
-	_, _, _ = setWindowLong.Call(hwnd, IntToUintptr(GWL_STYLE), newStyle)
+	_, _, _ = setWindowLong.Call(uintptr(hwnd), IntToUintptr(GWL_STYLE), newStyle)
 }
 
-// . Disables the close button in the title bar
-func DisableCloseButton(title string) {
+// . DisableCloseButton disables the close button in the window's title bar
+func DisableCloseButton(hwnd windows.HWND) {
+	//* Load necessary functions from user32.dll
 	user32 := syscall.MustLoadDLL("user32.dll")
-	findWindow := user32.MustFindProc("FindWindowW")
 	getSystemMenu := user32.MustFindProc("GetSystemMenu")
 	enableMenuItem := user32.MustFindProc("EnableMenuItem")
 
-	ptr, err := syscall.UTF16PtrFromString(title)
-	if err != nil {
-		return
-	}
-
-	hwnd, _, _ := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
-	if hwnd == 0 {
-		return
-	}
-
-	hMenu, _, _ := getSystemMenu.Call(hwnd, uintptr(0))
+	//* Retrieve the system menu handle for the window
+	hMenu, _, _ := getSystemMenu.Call(uintptr(hwnd), uintptr(0))
 	if hMenu == 0 {
-		return
+		return // Return if unable to retrieve the system menu
 	}
 
+	//* Disable the close button in the system menu
 	_, _, _ = enableMenuItem.Call(hMenu, uintptr(SC_CLOSE), uintptr(MF_BYCOMMAND|MF_GRAYED))
 }
 
-// . Hides the title bar
-func HideTitleBar(title string) {
+// . HideTitleBar removes the title bar from the window
+func HideTitleBar(hwnd windows.HWND) {
+	//* Load necessary functions from user32.dll
 	user32 := syscall.MustLoadDLL("user32.dll")
-	findWindow := user32.MustFindProc("FindWindowW")
 	getWindowLong := user32.MustFindProc("GetWindowLongPtrW")
 	setWindowLong := user32.MustFindProc("SetWindowLongPtrW")
 
-	ptr, err := syscall.UTF16PtrFromString(title)
-	if err != nil {
-		return
-	}
-
-	hwnd, _, _ := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
-	if hwnd == 0 {
-		return
-	}
-
-	style, _, _ := getWindowLong.Call(hwnd, IntToUintptr(GWL_STYLE))
+	//* Retrieve the current window style
+	style, _, _ := getWindowLong.Call(uintptr(hwnd), IntToUintptr(GWL_STYLE))
 	if style == 0 {
-		return
+		return // Return if unable to retrieve the style
 	}
 
+	//* Modify the style to remove the title bar
 	newStyle := style &^ uintptr(WS_CAPTION)
-	_, _, _ = setWindowLong.Call(hwnd, IntToUintptr(GWL_STYLE), newStyle)
+	_, _, _ = setWindowLong.Call(uintptr(hwnd), IntToUintptr(GWL_STYLE), newStyle)
 }
 
-// . Relocates and resizes the window
-func MoveWindow(title string, x, y, width, height int32) {
+// . MoveWindow relocates and resizes the specified window to the given position and dimensions
+func MoveWindow(hwnd windows.HWND, x, y, width, height int32) {
+	//* Load the MoveWindow function from user32.dll
 	user32 := syscall.MustLoadDLL("user32.dll")
-	findWindow := user32.MustFindProc("FindWindowW")
 	moveWindow := user32.MustFindProc("MoveWindow")
 
-	ptr, err := syscall.UTF16PtrFromString(title)
-	if err != nil {
-		return
-	}
-
-	hwnd, _, _ := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
-	if hwnd == 0 {
-		return
-	}
-
-	_, _, _ = moveWindow.Call(hwnd, uintptr(x), uintptr(y), uintptr(width), uintptr(height), uintptr(1))
+	//* Call MoveWindow to change the position and size of the window
+	_, _, _ = moveWindow.Call(uintptr(hwnd), uintptr(x), uintptr(y), uintptr(width), uintptr(height), uintptr(1))
 }
 
-// . Returns the taskbars current height
+// . GetTaskbarHeight returns the current height of the Windows taskbar
 func GetTaskbarHeight() int {
+	//* Load necessary functions from user32.dll
 	user32 := windows.MustLoadDLL("user32.dll")
 	getSystemMetrics := user32.MustFindProc("GetSystemMetrics")
 
+	//* Get the screen height in pixels
 	screenHeightRaw, _, _ := getSystemMetrics.Call(SM_CYSCREEN)
 	screenHeight := int32(screenHeightRaw)
 
+	//* Retrieve the work area (screen area excluding the taskbar)
 	rect := &RECT{}
 	systemparametersinfo := user32.MustFindProc("SystemParametersInfoW")
 	r1, _, err := systemparametersinfo.Call(SPI_GETWORKAREA, 0, uintptr(unsafe.Pointer(rect)), 0)
-
 	if r1 != 1 {
 		panic("SystemParametersInfoW failed: " + err.Error())
 	}
 
+	//* Calculate the taskbar height as the difference between screen height and work area height
 	workAreaHeight := rect.Bottom
 	taskbarHeight := screenHeight - workAreaHeight
 
 	return int(taskbarHeight)
 }
 
-// . Hides the window from the task bar
-func HideWindowFromTaskbar(title string) {
+// . HideWindowFromTaskbar removes the window from the Windows taskbar by adjusting its extended window styles
+func HideWindowFromTaskbar(hwnd windows.HWND) {
+	//* Load necessary functions from user32.dll
 	user32 := syscall.MustLoadDLL("user32.dll")
-	findWindow := user32.MustFindProc("FindWindowW")
 	getWindowLong := user32.MustFindProc("GetWindowLongW")
 	setWindowLong := user32.MustFindProc("SetWindowLongW")
 
-	ptr, err := syscall.UTF16PtrFromString(title)
-	if err != nil {
-		return
-	}
-
-	hwnd, _, _ := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
-	if hwnd == 0 {
-		return
-	}
-
+	//* Retrieve the current extended window style
 	gwl_exstyle := int32(-20)
-	exStyle, _, _ := getWindowLong.Call(hwnd, uintptr(gwl_exstyle))
+	exStyle, _, _ := getWindowLong.Call(uintptr(hwnd), uintptr(gwl_exstyle))
 	if exStyle == 0 {
-		return
+		return // Return if unable to retrieve the extended style
 	}
 
+	//* Modify the style to hide the window from the taskbar
 	newExStyle := (exStyle | uintptr(WS_EX_TOOLWINDOW)) &^ uintptr(WS_EX_APPWINDOW)
-	_, _, _ = setWindowLong.Call(hwnd, uintptr(gwl_exstyle), newExStyle)
+	_, _, _ = setWindowLong.Call(uintptr(hwnd), uintptr(gwl_exstyle), newExStyle)
 }
 
-// . Shows the window
-func ShowWindow(title string) {
+// . ShowWindow makes the specified window visible on the screen
+func ShowWindow(hwnd windows.HWND) {
+	//* Load the ShowWindow function from user32.dll
 	user32 := syscall.MustLoadDLL("user32.dll")
-	findWindow := user32.MustFindProc("FindWindowW")
 	showWindow := user32.MustFindProc("ShowWindow")
 
-	ptr, err := syscall.UTF16PtrFromString(title)
-	if err != nil {
-		return
-	}
-
-	hwnd, _, _ := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
-	if hwnd == 0 {
-		return
-	}
-
-	_, _, _ = showWindow.Call(hwnd, uintptr(SW_SHOW))
+	//* Call ShowWindow to display the window
+	_, _, _ = showWindow.Call(uintptr(hwnd), uintptr(SW_SHOW))
 }
 
-// . Hides the window
-func HideWindow(title string) {
+// . HideWindow hides the specified window by calling the ShowWindow function with SW_HIDE
+func HideWindow(hwnd windows.HWND) {
+	//* Load the ShowWindow function from user32.dll
 	user32 := syscall.MustLoadDLL("user32.dll")
-	findWindow := user32.MustFindProc("FindWindowW")
 	showWindow := user32.MustFindProc("ShowWindow")
 
-	ptr, err := syscall.UTF16PtrFromString(title)
-	if err != nil {
-		return
-	}
-
-	hwnd, _, _ := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
-	if hwnd == 0 {
-		return
-	}
-
-	_, _, _ = showWindow.Call(hwnd, uintptr(SW_HIDE))
+	//* Call ShowWindow with SW_HIDE to hide the window
+	_, _, _ = showWindow.Call(uintptr(hwnd), uintptr(SW_HIDE))
 }
 
-// . Checks if the window is visible
-func IsWindowVisible(title string) bool {
+// . IsWindowVisible checks if the specified window is currently visible
+func IsWindowVisible(hwnd windows.HWND) bool {
+	//* Load the IsWindowVisible function from user32.dll
 	user32 := syscall.MustLoadDLL("user32.dll")
-	findWindow := user32.MustFindProc("FindWindowW")
 	isWindowVisible := user32.MustFindProc("IsWindowVisible")
 
-	ptr, err := syscall.UTF16PtrFromString(title)
-	if err != nil {
-		return false
-	}
-
-	hwnd, _, _ := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
-	if hwnd == 0 {
-		return false
-	}
-
-	ret, _, _ := isWindowVisible.Call(hwnd)
-	return ret != 0
+	//* Call IsWindowVisible to check visibility status
+	ret, _, _ := isWindowVisible.Call(uintptr(hwnd))
+	return ret != 0 // Returns true if the window is visible
 }
 
-// . Sets the window to be topmost
-func SetTopmost(title string) {
+// . SetTopmost sets the specified window to be always on top (topmost)
+func SetTopmost(hwnd windows.HWND) {
+	//* Load the SetWindowPos function from user32.dll
 	user32dll := windows.MustLoadDLL("user32.dll")
-	findWindow := user32dll.MustFindProc("FindWindowW")
 	setwindowpos := user32dll.MustFindProc("SetWindowPos")
 
-	ptr, err := syscall.UTF16PtrFromString(title)
-	if err != nil {
-		return
-	}
-
-	hwnd, _, _ := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
-	if hwnd == 0 {
-		return
-	}
-
-	_, _, _ = setwindowpos.Call(hwnd, IntToUintptr(-1), 0, 0, 0, 0, SWP_NOSIZE|SWP_NOMOVE)
+	//* Call SetWindowPos with HWND_TOPMOST to make the window topmost
+	_, _, _ = setwindowpos.Call(uintptr(hwnd), IntToUintptr(-1), 0, 0, 0, 0, SWP_NOSIZE|SWP_NOMOVE)
 }
 
-// . Removes window topmost
-func RemoveTopmost(title string) {
+// . RemoveTopmost removes the always-on-top status from the specified window
+func RemoveTopmost(hwnd windows.HWND) {
+	//* Load the SetWindowPos function from user32.dll
 	user32dll := windows.MustLoadDLL("user32.dll")
-	findWindow := user32dll.MustFindProc("FindWindowW")
 	setwindowpos := user32dll.MustFindProc("SetWindowPos")
 
-	ptr, err := syscall.UTF16PtrFromString(title)
-	if err != nil {
-		return
-	}
-
-	hwnd, _, _ := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
-	if hwnd == 0 {
-		return
-	}
-
-	_, _, _ = setwindowpos.Call(hwnd, IntToUintptr(-2), 0, 0, 0, 0, SWP_NOSIZE|SWP_NOMOVE)
+	//* Call SetWindowPos with HWND_NOTOPMOST to remove the topmost property
+	_, _, _ = setwindowpos.Call(uintptr(hwnd), IntToUintptr(-2), 0, 0, 0, 0, SWP_NOSIZE|SWP_NOMOVE)
 }
 
-func GetWindowPosition(title string) (x, y int32, err error) {
+// . GetWindowPosition retrieves the current position of the specified window on the screen
+func GetWindowPosition(hwnd windows.HWND) (x, y int32, err error) {
+	//* Load the GetWindowRect function from user32.dll
 	user32 := syscall.MustLoadDLL("user32.dll")
-	findWindow := user32.MustFindProc("FindWindowW")
 	getWindowRect := user32.MustFindProc("GetWindowRect")
 
-	ptr, err := syscall.UTF16PtrFromString(title)
-	if err != nil {
-		return 0, 0, err
-	}
-
-	hwnd, _, _ := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
-	if hwnd == 0 {
-		return 0, 0, syscall.GetLastError()
-	}
-
+	//* Retrieve the window's RECT structure containing its screen coordinates
 	var rect RECT
-	r1, _, err := getWindowRect.Call(hwnd, uintptr(unsafe.Pointer(&rect)))
+	r1, _, err := getWindowRect.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&rect)))
 	if r1 == 0 {
-		return 0, 0, err
+		return 0, 0, err // Return an error if the call fails
 	}
 
+	//* Extract the top-left corner coordinates of the window
 	return rect.Left, rect.Top, nil
 }
 
-func GetWindowSize(title string) (width, height int32, err error) {
+// . GetWindowSize retrieves the dimensions (width and height) of the specified window
+func GetWindowSize(hwnd windows.HWND) (width, height int32, err error) {
+	//* Load the GetWindowRect function from user32.dll
 	user32 := syscall.MustLoadDLL("user32.dll")
-	findWindow := user32.MustFindProc("FindWindowW")
 	getWindowRect := user32.MustFindProc("GetWindowRect")
 
-	ptr, err := syscall.UTF16PtrFromString(title)
-	if err != nil {
-		return 0, 0, err
-	}
-
-	hwnd, _, _ := findWindow.Call(uintptr(0), uintptr(unsafe.Pointer(ptr)))
-	if hwnd == 0 {
-		return 0, 0, syscall.GetLastError()
-	}
-
+	//* Retrieve the window's RECT structure to calculate its size
 	var rect RECT
-	r1, _, err := getWindowRect.Call(hwnd, uintptr(unsafe.Pointer(&rect)))
+	r1, _, err := getWindowRect.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&rect)))
 	if r1 == 0 {
-		return 0, 0, err
+		return 0, 0, err // Return an error if the call fails
 	}
 
+	//* Calculate width and height from RECT coordinates
 	width = rect.Right - rect.Left
 	height = rect.Bottom - rect.Top
 	return width, height, nil
