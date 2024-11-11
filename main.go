@@ -572,20 +572,9 @@ func hideOnClick() {
 		if k.Message == 513 { // Left mouse button down event
 			//* Check if the click is outside the application window and taskbar
 			if !isMouseInWindow() && !isMouseInTaskbar() && !configWindowOpen {
-				//* Update the last interaction time and trigger debounceHideWindow in a separate goroutine
-				lastInteractionTime = time.Now()
-				go debounceHideWindow()
+				winapi.HideWindow(hwnd)
 			}
 		}
-	}
-}
-
-// . debounceHideWindow waits for a debounce duration and hides the window if no interaction occurs within that time
-func debounceHideWindow() {
-	time.Sleep(debounceDuration)
-	//* Check if enough time has passed since the last interaction and the window is still visible
-	if time.Since(lastInteractionTime) >= debounceDuration && winapi.IsWindowVisible(hwnd) {
-		winapi.HideWindow(hwnd)
 	}
 }
 
