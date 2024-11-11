@@ -623,6 +623,10 @@ func monitorDeviceChanges() {
 
 	for {
 		<-ticker.C
+		if !winapi.IsWindowVisible(hwnd) {
+			continue
+		}
+
 		if currentDeviceID != "" {
 			// Retrieve current volume and mute state
 			volume, err := policyConfig.GetVolume(currentDeviceID)
