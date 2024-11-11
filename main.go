@@ -51,7 +51,7 @@ var initialized = false
 var configWindowOpen = false
 var settings AppSettings
 var lastInteractionTime time.Time
-var debounceDuration = 100 * time.Millisecond
+var debounceDuration = 50 * time.Millisecond
 var currentDeviceID string
 var audioDevices []mmDeviceEnumerator.AudioDevice
 var screenWidth = int(win.GetSystemMetrics(win.SM_CXSCREEN))
@@ -62,8 +62,8 @@ var deviceVboxPlaceholder = container.New(&fyneCustom.CustomVBoxLayout{FixedWidt
 
 //go:embed speaker.ico
 var icon []byte
-var title = "SoundShift "
-var App fyne.App = app.NewWithID(title)
+var title = "SoundShift"
+var App fyne.App = app.New()
 var Win fyne.Window = App.NewWindow(title)
 var configWin fyne.Window = App.NewWindow("Configure")
 
@@ -77,7 +77,6 @@ var mainView = container.NewPadded(
 			deviceVboxPlaceholder,
 			&canvas.Line{StrokeColor: colormap.Gray, StrokeWidth: 1},
 			configButton,
-			&canvas.Text{Text: "", TextSize: 10},
 			container.NewPadded(volumeSlider),
 		),
 	),
