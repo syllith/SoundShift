@@ -124,7 +124,7 @@ func init() {
 
 func resize() {
 	size := Win.Content().MinSize()
-	winapi.MoveWindow(hwnd, int32(screenWidth-int(size.Width)-20), int32(screenHeight-int(size.Height)-60-taskbarHeight), int32(size.Width), int32(size.Height))
+	winapi.MoveWindow(hwnd, int32(screenWidth-int(size.Width)-50), int32(screenHeight-int(size.Height)-75-taskbarHeight), int32(size.Width), int32(size.Height))
 	fmt.Println("Resized window")
 }
 
