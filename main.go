@@ -122,8 +122,14 @@ func init() {
 }
 
 func resize() {
+	if hwnd == 0 {
+		return
+	}
 	size := Win.Content().MinSize()
-	winapi.MoveWindow(hwnd, int32(screenWidth-int(size.Width)-50), int32(screenHeight-int(size.Height)-75-taskbarHeight), int32(size.Width), int32(size.Height))
+	paddingX := int(float64(screenWidth) * 0.02)  // Adjusted horizontally as 5% of screen width
+	paddingY := int(float64(screenHeight) * 0.05) // Adjusted vertically as 7% of screen height
+
+	winapi.MoveWindow(hwnd, int32(screenWidth-int(size.Width)-paddingX), int32(screenHeight-int(size.Height)-paddingY-taskbarHeight), int32(size.Width), int32(size.Height))
 	fmt.Println("Resized window")
 }
 
@@ -161,6 +167,7 @@ func main() {
 			}
 
 			//* Apply Windows API settings to the application window
+			resize()
 			winapi.HideWindow(hwnd)
 			winapi.HideMinMaxButtons(hwnd)
 			winapi.HideWindowFromTaskbar(hwnd)
@@ -168,8 +175,6 @@ func main() {
 
 			//* Initialize the system tray icon and menu
 			go systray.Run(initTray, func() {})
-
-			resize()
 
 			initialized = true
 		}
