@@ -104,21 +104,71 @@ func (r *colorButtonRenderer) Destroy() {}
 
 // . Layout arranges the ColorButton's components (background, icon, text) based on the provided size
 func (r *colorButtonRenderer) Layout(size fyne.Size) {
-	//* Resize the text renderer to fill the entire button area
-	r.textRenderer.Resize(size)
+	// Padding for icon and text
+	const iconPadding = 6
+	const textPadding = 8
 
-	//* Resize the icon slightly smaller to keep padding around the edges
-	r.iconRenderer.Resize(fyne.NewSize(size.Width-4, size.Height-4))
+	text := r.button.Text
+	if text == "" {
+		// Icon-only button: center icon and background in button
+		iconSize := size.Width
+		if size.Height < size.Width {
+			iconSize = size.Height
+		}
+		iconSize = iconSize - iconPadding*2
+		if iconSize < 0 {
+			iconSize = 0
+		}
+		x := (size.Width - iconSize) / 2
+		y := (size.Height - iconSize) / 2
+		r.iconRenderer.Resize(fyne.NewSize(iconSize, iconSize))
+		r.iconRenderer.Move(fyne.NewPos(x, y))
+		// Move and resize background to match icon
+		r.bgRenderer.Resize(fyne.NewSize(iconSize, iconSize))
+		r.bgRenderer.Move(fyne.NewPos(x, y))
+		// Hide text
+		r.textRenderer.Resize(fyne.NewSize(0, 0))
+		r.textRenderer.Move(fyne.NewPos(0, 0))
+	} else {
+		// Layout background to full size
+		r.bgRenderer.Resize(size)
+		// Layout icon: place on the right, vertically centered
+		iconSize := size.Height - iconPadding*2
+		if iconSize < 0 {
+			iconSize = 0
+		}
+		r.iconRenderer.Resize(fyne.NewSize(iconSize, iconSize))
+		r.iconRenderer.Move(fyne.NewPos(size.Width-iconSize-iconPadding, iconPadding))
 
-	//* Resize the background to match the button's size
-	r.bgRenderer.Resize(size)
+		// Layout text: fill remaining space, with padding
+		textWidth := size.Width - iconSize - iconPadding - textPadding
+		if textWidth < 0 {
+			textWidth = 0
+		}
+		r.textRenderer.Resize(fyne.NewSize(textWidth, size.Height-2*textPadding))
+		r.textRenderer.Move(fyne.NewPos(textPadding, textPadding))
+	}
 }
 
 // . MinSize calculates the minimum size required to display the ColorButton's text and icon
 func (r *colorButtonRenderer) MinSize() fyne.Size {
-	//* Calculate the minimum size based on the text renderer, with some padding
-	textMinSize := r.textRenderer.MinSize()
-	return fyne.NewSize(textMinSize.Width-4, textMinSize.Height-4)
+	// Calculate minimum size for icon-only or text+icon button
+	const iconPadding = 6
+	const textPadding = 8
+	text := r.button.Text
+	iconMin := r.iconRenderer.MinSize()
+	if text == "" {
+		// Icon-only button: just icon plus padding
+		return fyne.NewSize(iconMin.Width+iconPadding*2, iconMin.Height+iconPadding*2)
+	}
+	// Text + icon button
+	textMin := r.textRenderer.MinSize()
+	width := textMin.Width + iconMin.Width + iconPadding + textPadding*2
+	height := textMin.Height
+	if iconMin.Height+iconPadding*2 > height {
+		height = iconMin.Height + iconPadding*2
+	}
+	return fyne.NewSize(width, height)
 }
 
 // . Objects returns all drawable components of the ColorButton for rendering

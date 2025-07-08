@@ -50,8 +50,6 @@ type AppSettings struct {
 var initialized = false
 var configWindowOpen = false
 var settings AppSettings
-var lastInteractionTime time.Time
-var debounceDuration = 50 * time.Millisecond
 var currentDeviceID string
 var audioDevices []mmDeviceEnumerator.AudioDevice
 var screenWidth = int(win.GetSystemMetrics(win.SM_CXSCREEN))
@@ -66,9 +64,6 @@ var title = "SoundShift"
 var App fyne.App = app.New()
 var Win fyne.Window = App.NewWindow(title)
 var configWin fyne.Window = App.NewWindow("Configure")
-
-// * Device selection container
-var deviceVbox = container.New(&fyneCustom.CustomVBoxLayout{FixedWidth: 150})
 
 // * Main view layout
 var mainView = container.NewPadded(
@@ -121,16 +116,29 @@ func init() {
 	})
 }
 
+func refreshScreenMetrics() {
+	screenWidth = int(win.GetSystemMetrics(win.SM_CXSCREEN))
+	screenHeight = int(win.GetSystemMetrics(win.SM_CYSCREEN))
+	taskbarHeight = winapi.GetTaskbarHeight()
+}
+
 func resize() {
 	if hwnd == 0 {
 		return
 	}
-	size := Win.Content().MinSize()
-	paddingX := int(float64(screenWidth) * 0.02)  // Adjusted horizontally as 5% of screen width
-	paddingY := int(float64(screenHeight) * 0.05) // Adjusted vertically as 7% of screen height
+	refreshScreenMetrics() // <-- now recalculated each call
 
-	winapi.MoveWindow(hwnd, int32(screenWidth-int(size.Width)-paddingX), int32(screenHeight-int(size.Height)-paddingY-taskbarHeight), int32(size.Width), int32(size.Height))
-	fmt.Println("Resized window")
+	size := Win.Content().MinSize()
+	paddingX := int(float64(screenWidth) * 0.02)
+	paddingY := int(float64(screenHeight) * 0.05)
+
+	winapi.MoveWindow(
+		hwnd,
+		int32(screenWidth-int(size.Width)-paddingX),
+		int32(screenHeight-int(size.Height)-paddingY-taskbarHeight),
+		int32(size.Width),
+		int32(size.Height),
+	)
 }
 
 // . main initializes the application, sets up the UI and systray, and manages application lifecycle events.
@@ -223,10 +231,11 @@ func checkAndUpdateDevices() {
 	if !slicesEqual(audioDevices, newAudioDevices) && !configWindowOpen {
 		//* Update audio devices if changes are detected
 		audioDevices = newAudioDevices
-		loadSettings()  // Reload settings to handle device ID changes
-		renderButtons() // Re-render device buttons based on updated device list
-		fmt.Println("Devices updated")
-		resize()
+		loadSettings() // Reload settings to handle device ID changes
+		fyne.Do(func() {
+			renderButtons()
+			resize()
+		})
 	}
 }
 
@@ -240,11 +249,8 @@ func updateDevices() {
 	defer ticker.Stop()
 
 	// Periodically check for audio device updates
-	for {
-		select {
-		case <-ticker.C:
-			checkAndUpdateDevices() // Check and update device list every 3 seconds
-		}
+	for range ticker.C {
+		checkAndUpdateDevices() // Check and update device list every 3 seconds
 	}
 }
 
@@ -272,23 +278,19 @@ func renderButtons() {
 		//* Define the function to handle button tap events for selecting a device
 		onTapped := func(deviceID string) func() {
 			return func() {
-				//* Set the selected device as the default audio endpoint
-				err := policyConfig.SetDefaultEndPoint(deviceID)
-				if err != nil {
+				if err := policyConfig.SetDefaultEndPoint(deviceID); err != nil {
 					fmt.Println("Error setting default endpoint:", err)
 					general.LogError("Error setting default endpoint:", err)
 					return
 				}
-
-				//* Update the default status for each device in the list
+				// Wait for the system to update the default endpoint
+				time.Sleep(200 * time.Millisecond)
+				// Refresh device list and update UI accordingly
+				audioDevices, _ = mmDeviceEnumerator.GetDevices()
 				for i := range audioDevices {
 					audioDevices[i].IsDefault = (audioDevices[i].Id == deviceID)
 				}
-
-				//* Re-render buttons to update UI
 				renderButtons()
-
-				//* Hide the main window after selection if the option is enabled
 				if settings.HideAfterSelection {
 					winapi.HideWindow(hwnd)
 				}
@@ -539,21 +541,22 @@ func initTray() {
 	//* Toggle the application window's visibility when the tray icon is clicked
 	systray.SetOnClick(func(menu systray.IMenu) {
 		if hwnd == 0 {
-			//! Window handle (hwnd) is not available, cannot toggle visibility
-			fmt.Println("Window handle (hwnd) not available")
-			return
+			var err error
+			hwnd, err = winapi.GetHwnd(windows.GetCurrentProcessId(), title)
+			if err != nil || hwnd == 0 {
+				fmt.Println("Window handle not available")
+				return
+			}
 		}
 
-		//* Check if the application window is currently visible
-		isVisible := winapi.IsWindowVisible(hwnd)
-		if isVisible {
-			//* Hide the window if it is currently visible
+		if winapi.IsWindowVisible(hwnd) {
 			winapi.HideWindow(hwnd)
 		} else {
-			//* Show and reposition the window if it is hidden
-			//TODO: Add setting to determine if window should resize back to its initial position, or stay where it was at last
-			winapi.ShowWindow(hwnd)
-			winapi.SetTopmost(hwnd)
+			fyne.Do(func() {
+				resize()
+				winapi.ShowWindow(hwnd)
+				winapi.SetTopmost(hwnd)
+			})
 		}
 	})
 
@@ -646,11 +649,13 @@ func monitorDeviceChanges() {
 				continue
 			}
 
-			if muted {
-				volumeSlider.SetValue(0) // Set slider to 0 if muted
-			} else {
-				volumeSlider.SetValue(float64(volume * 100)) // Set slider to current volume level
-			}
+			fyne.Do(func() {
+				if muted {
+					volumeSlider.SetValue(0)
+				} else {
+					volumeSlider.SetValue(float64(volume * 100))
+				}
+			})
 		}
 	}
 }
