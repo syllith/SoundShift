@@ -13,6 +13,7 @@ import (
 // . ScrollableSlider is a custom slider that can be adjusted using scroll events
 type ScrollableSlider struct {
 	widget.Slider
+	Disabled bool // Custom disabled flag
 }
 
 // . NewScrollableSlider creates a new ScrollableSlider with specified min and max values
@@ -26,6 +27,10 @@ func NewScrollableSlider(min, max float64) *ScrollableSlider {
 
 // . Scrolled adjusts the slider's value based on scroll events
 func (s *ScrollableSlider) Scrolled(ev *fyne.ScrollEvent) {
+	// Ignore scroll if disabled
+	if s.Disabled {
+		return
+	}
 	//* Define the increment amount as 1/20th of the slider's range
 	increment := (s.Max - s.Min) / 20 // Adjust increment as needed
 
