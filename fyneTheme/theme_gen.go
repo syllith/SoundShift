@@ -20,11 +20,11 @@ func (CustomTheme) Color(c fyne.ThemeColorName, v fyne.ThemeVariant) color.Color
 	case theme.ColorNameSeparator:
 		return color.NRGBA{R: 0x20, G: 0x25, B: 0x30, A: 0xff}
 	case theme.ColorNameBackground:
-		return color.NRGBA{R: 0x20, G: 0x25, B: 0x30, A: 0xff} // darker background
+		return color.NRGBA{R: 0x00, G: 0x00, B: 0x00, A: 0x00} // transparent so DWM acrylic shows through
 	case theme.ColorNameButton:
-		return color.NRGBA{R: 0x3f, G: 0x7a, B: 0xc3, A: 0xff} // softer button color
+		return color.NRGBA{R: 0x3f, G: 0x7a, B: 0xc3, A: 0xc0} // frosted: blue at 75% so acrylic shows through
 	case theme.ColorNameDisabledButton:
-		return color.NRGBA{R: 0x39, G: 0x38, B: 0x38, A: 0xff}
+		return color.NRGBA{R: 0x39, G: 0x38, B: 0x38, A: 0xc0} // frosted disabled
 	case theme.ColorNameDisabled:
 		return color.NRGBA{R: 0xaf, G: 0xb3, B: 0xb1, A: 0xff} // higher contrast for disabled text
 	case theme.ColorNameError:

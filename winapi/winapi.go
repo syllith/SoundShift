@@ -24,6 +24,19 @@ const (
 	SW_SHOW          = 5
 	SWP_NOSIZE       = 0x0001
 	SWP_NOMOVE       = 0x0002
+	SWP_NOZORDER     = 0x0004
+	SWP_FRAMECHANGED = 0x0020
+
+	WS_THICKFRAME = 0x00040000 // resize border — must be removed alongside WS_CAPTION
+
+	// WM_SYSCOMMAND / SC_MOVE — used to trigger native mouse-driven window dragging
+	WM_SYSCOMMAND = 0x0112
+	SC_MOVE       = 0xF010
+	HTCAPTION     = 2 // low nibble added to SC_MOVE wParam to signal mouse-initiated drag
+
+	// Accent / composition constants for DWM acrylic blur
+	ACCENT_ENABLE_ACRYLICBLURBEHIND = 4
+	WCA_ACCENT_POLICY               = 19
 )
 
 // RECT defines a rectangle area used by Windows APIs for window positioning
@@ -34,8 +47,29 @@ type RECT struct {
 	Bottom int32
 }
 
+// AccentPolicy configures the DWM accent (blur/acrylic) applied to a window.
+// GradientColor is in AABBGGRR byte order.
+type AccentPolicy struct {
+	AccentState   uint32
+	AccentFlags   uint32
+	GradientColor uint32
+	AnimationId   uint32
+}
+
+// WindowCompositionAttribData is the parameter block for SetWindowCompositionAttribute.
+type WindowCompositionAttribData struct {
+	Attrib uint32
+	_      [4]byte // padding so PvData is 8-byte aligned on 64-bit
+	PvData uintptr
+	CbData uintptr
+}
+
 // . Cached DLL and proc handles — loaded once at startup instead of on every call
 var (
+	// SetWindowCompositionAttribute is undocumented but stable since Windows 10.
+	// Loaded lazily so a missing proc causes a runtime error only if called, not at startup.
+	procSetWindowCompositionAttr = windows.NewLazySystemDLL("user32.dll").NewProc("SetWindowCompositionAttribute")
+
 	user32dll                    = windows.MustLoadDLL("user32.dll")
 	procEnumWindows              = user32dll.MustFindProc("EnumWindows")
 	procGetWindowThreadProcessId = user32dll.MustFindProc("GetWindowThreadProcessId")
@@ -50,6 +84,8 @@ var (
 	procMoveWindow               = user32dll.MustFindProc("MoveWindow")
 	procSetWindowPos             = user32dll.MustFindProc("SetWindowPos")
 	procShowWindow               = user32dll.MustFindProc("ShowWindow")
+	procReleaseCapture           = user32dll.MustFindProc("ReleaseCapture")
+	procSendMessageW             = user32dll.MustFindProc("SendMessageW")
 	procGetWindowRect            = user32dll.MustFindProc("GetWindowRect")
 	procGetSystemMetrics         = user32dll.MustFindProc("GetSystemMetrics")
 	procSystemParametersInfoW    = user32dll.MustFindProc("SystemParametersInfoW")
@@ -126,17 +162,23 @@ func DisableCloseButton(hwnd windows.HWND) {
 	procEnableMenuItem.Call(hMenu, uintptr(SC_CLOSE), uintptr(MF_BYCOMMAND|MF_GRAYED))
 }
 
-// . HideTitleBar removes the title bar from the window
+// . HideTitleBar removes the native title bar and resize border, then forces a frame refresh
 func HideTitleBar(hwnd windows.HWND) {
-	//* Retrieve the current window style
 	style, _, _ := procGetWindowLongPtrW.Call(uintptr(hwnd), IntToUintptr(GWL_STYLE))
 	if style == 0 {
 		return
 	}
+	// Remove caption (title bar) AND thick frame (resize border that causes the sliver artifact)
+	procSetWindowLongPtrW.Call(uintptr(hwnd), IntToUintptr(GWL_STYLE), style&^uintptr(WS_CAPTION|WS_THICKFRAME))
+	procSetWindowPos.Call(uintptr(hwnd), 0, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_NOZORDER|SWP_FRAMECHANGED)
+}
 
-	//* Modify the style to remove the title bar
-	newStyle := style &^ uintptr(WS_CAPTION)
-	procSetWindowLongPtrW.Call(uintptr(hwnd), IntToUintptr(GWL_STYLE), newStyle)
+// . StartWindowDrag triggers native mouse-driven window dragging.
+// SC_MOVE does not require cursor coords in lParam, so it works reliably for borderless windows.
+// SendMessage runs in a goroutine so Fyne's event goroutine is not stalled during the drag loop.
+func StartWindowDrag(hwnd windows.HWND) {
+	procReleaseCapture.Call()
+	go procSendMessageW.Call(uintptr(hwnd), WM_SYSCOMMAND, SC_MOVE|HTCAPTION, 0)
 }
 
 // . MoveWindow relocates and resizes the specified window to the given position and dimensions
@@ -225,4 +267,23 @@ func GetWindowSize(hwnd windows.HWND) (width, height int32, err error) {
 	width = rect.Right - rect.Left
 	height = rect.Bottom - rect.Top
 	return width, height, nil
+}
+
+// . EnableAcrylic applies the Windows acrylic blur-behind effect to the window.
+// It uses SetWindowCompositionAttribute with ACCENT_ENABLE_ACRYLICBLURBEHIND so that
+// DWM composites a blurred + tinted version of the content behind the window.
+// GradientColor is 0xAABBGGRR: dark blue-gray (#202530) at 75% opacity.
+func EnableAcrylic(hwnd windows.HWND) {
+	accent := AccentPolicy{
+		AccentState:   ACCENT_ENABLE_ACRYLICBLURBEHIND,
+		AccentFlags:   0,
+		GradientColor: 0x80302520, // AABBGGRR: A=0xC0 B=0x30 G=0x25 R=0x20 → #202530 @ 75%
+		AnimationId:   0,
+	}
+	data := WindowCompositionAttribData{
+		Attrib: WCA_ACCENT_POLICY,
+		PvData: uintptr(unsafe.Pointer(&accent)),
+		CbData: unsafe.Sizeof(accent),
+	}
+	procSetWindowCompositionAttr.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&data)))
 }

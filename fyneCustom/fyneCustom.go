@@ -13,7 +13,9 @@ import (
 // . ScrollableSlider is a custom slider that can be adjusted using scroll events
 type ScrollableSlider struct {
 	widget.Slider
-	Disabled bool // Custom disabled flag
+	Disabled   bool // Custom disabled flag
+	mouseDown  bool // True while a mouse button is physically held on this widget
+	isDragging bool // True while the user is actively dragging the thumb
 }
 
 // . NewScrollableSlider creates a new ScrollableSlider with specified min and max values
@@ -54,6 +56,42 @@ func (s *ScrollableSlider) Scrolled(ev *fyne.ScrollEvent) {
 	if s.OnChanged != nil {
 		s.OnChanged(s.Value)
 	}
+}
+
+// . MouseDown records that the mouse button is held.
+// Tracking this ourselves is the key guard against phantom drag events.
+func (s *ScrollableSlider) MouseDown(ev *desktop.MouseEvent) {
+	s.mouseDown = true
+}
+
+// . MouseUp clears both the held-button and dragging flags.
+func (s *ScrollableSlider) MouseUp(ev *desktop.MouseEvent) {
+	s.mouseDown = false
+	s.isDragging = false
+}
+
+// . Dragged only forwards drag events to the base slider when the mouse button is
+// actually held. Without this guard, Fyne can deliver DragEvent objects that were
+// not preceded by a MouseDown on this widget (e.g. after focus changes), causing
+// the slider to track raw mouse position with no button pressed.
+func (s *ScrollableSlider) Dragged(ev *fyne.DragEvent) {
+	if !s.mouseDown {
+		return
+	}
+	s.isDragging = true
+	s.Slider.Dragged(ev)
+}
+
+// . DragEnd clears the dragging flag and forwards to the base slider.
+func (s *ScrollableSlider) DragEnd() {
+	s.isDragging = false
+	s.Slider.DragEnd()
+}
+
+// . IsDragging returns true while the user is actively dragging the slider thumb.
+// Use this to suppress external SetValue calls that would interrupt a drag.
+func (s *ScrollableSlider) IsDragging() bool {
+	return s.isDragging
 }
 
 // . MouseIn is required to satisfy the desktop.Hoverable interface
@@ -98,8 +136,9 @@ func (c *ColorButton) CreateRenderer() fyne.WidgetRenderer {
 		textRenderer: canvas.NewText(c.Text, color.Black), // Renderer for button text, defaulting to black color
 		iconRenderer: canvas.NewImageFromResource(c.icon), // Renderer for the button icon
 		bgRenderer: &canvas.Rectangle{ // Renderer for the button background
-			FillColor:   c.backgroundColor, // Set background fill color
-			StrokeColor: c.backgroundColor, // Set background stroke color (same as fill for simplicity)
+			FillColor:    c.backgroundColor,
+			StrokeColor:  c.backgroundColor,
+			CornerRadius: 4, // Match Fyne's standard button rounding
 		},
 	}
 }
@@ -240,4 +279,180 @@ func (c *CustomVBoxLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 
 	//* Return the fixed width and calculated total height as the minimum size
 	return fyne.NewSize(c.FixedWidth, totalHeight)
+}
+
+// . DragArea is a transparent widget that spans the title bar's drag zone.
+// It triggers native window dragging when the primary mouse button is pressed.
+type DragArea struct {
+	widget.BaseWidget
+	OnDragStart func()
+}
+
+// . NewDragArea creates a DragArea that calls onDragStart on left mouse button press.
+func NewDragArea(onDragStart func()) *DragArea {
+	d := &DragArea{OnDragStart: onDragStart}
+	d.ExtendBaseWidget(d)
+	return d
+}
+
+func (d *DragArea) MouseDown(ev *desktop.MouseEvent) {
+	if ev.Button == desktop.MouseButtonPrimary && d.OnDragStart != nil {
+		d.OnDragStart()
+	}
+}
+
+func (d *DragArea) MouseUp(*desktop.MouseEvent) {}
+
+func (d *DragArea) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(canvas.NewRectangle(color.Transparent))
+}
+
+// titleBarCloseWidth is the pixel width reserved for the close icon on the right.
+const titleBarCloseWidth = float32(40)
+
+// TitleBar is a custom title bar widget that renders the app icon, title text, and
+// a close icon with a red hover effect. Clicking anywhere except the close icon drags
+// the window; clicking the close icon calls onClose.
+type TitleBar struct {
+	widget.BaseWidget
+	icon         fyne.Resource
+	title        string
+	onClose      func()
+	onDragStart  func()
+	closeHovered bool
+}
+
+type titleBarRenderer struct {
+	tb        *TitleBar
+	appIcon   *canvas.Image
+	titleText *canvas.Text
+	closeBg   *canvas.Rectangle
+	closeText *canvas.Text
+}
+
+// NewTitleBar creates a TitleBar with the given app icon, title, close callback, and drag callback.
+func NewTitleBar(icon fyne.Resource, title string, onClose func(), onDragStart func()) *TitleBar {
+	tb := &TitleBar{
+		icon:        icon,
+		title:       title,
+		onClose:     onClose,
+		onDragStart: onDragStart,
+	}
+	tb.ExtendBaseWidget(tb)
+	return tb
+}
+
+func (tb *TitleBar) CreateRenderer() fyne.WidgetRenderer {
+	appIcon := canvas.NewImageFromResource(tb.icon)
+	appIcon.FillMode = canvas.ImageFillContain
+
+	titleText := canvas.NewText(tb.title, color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff})
+	titleText.TextSize = 12
+
+	closeBg := canvas.NewRectangle(color.Transparent)
+	closeBg.CornerRadius = 4
+
+	closeText := canvas.NewText("✕", color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xb0})
+	closeText.TextSize = 13
+
+	return &titleBarRenderer{
+		tb:        tb,
+		appIcon:   appIcon,
+		titleText: titleText,
+		closeBg:   closeBg,
+		closeText: closeText,
+	}
+}
+
+func (r *titleBarRenderer) Layout(size fyne.Size) {
+	const iconPad = float32(8)
+	const iconSize = float32(14)
+	const gap = float32(6)
+
+	// App icon — left edge, vertically centered
+	iconY := (size.Height - iconSize) / 2
+	r.appIcon.Move(fyne.NewPos(iconPad, iconY))
+	r.appIcon.Resize(fyne.NewSize(iconSize, iconSize))
+
+	// Title text — right of icon, vertically centered
+	textH := r.titleText.MinSize().Height
+	titleX := iconPad + iconSize + gap
+	titleY := (size.Height - textH) / 2
+	titleW := size.Width - titleX - titleBarCloseWidth
+	if titleW < 0 {
+		titleW = 0
+	}
+	r.titleText.Move(fyne.NewPos(titleX, titleY))
+	r.titleText.Resize(fyne.NewSize(titleW, textH))
+
+	// Close button background — right edge, full height
+	r.closeBg.Move(fyne.NewPos(size.Width-titleBarCloseWidth, 0))
+	r.closeBg.Resize(fyne.NewSize(titleBarCloseWidth, size.Height))
+
+	// Close ✕ — centered inside the close button area
+	cw := r.closeText.MinSize().Width
+	ch := r.closeText.MinSize().Height
+	r.closeText.Move(fyne.NewPos(
+		size.Width-titleBarCloseWidth+(titleBarCloseWidth-cw)/2,
+		(size.Height-ch)/2,
+	))
+	r.closeText.Resize(fyne.NewSize(cw, ch))
+}
+
+func (r *titleBarRenderer) MinSize() fyne.Size {
+	return fyne.NewSize(titleBarCloseWidth+100, 34)
+}
+
+func (r *titleBarRenderer) Refresh() {
+	if r.tb.closeHovered {
+		r.closeBg.FillColor = color.NRGBA{R: 0xc4, G: 0x2b, B: 0x1c, A: 0xcc}
+		r.closeText.Color = color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}
+	} else {
+		r.closeBg.FillColor = color.Transparent
+		r.closeText.Color = color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xb0}
+	}
+	r.closeBg.Refresh()
+	r.closeText.Refresh()
+}
+
+func (r *titleBarRenderer) Objects() []fyne.CanvasObject {
+	return []fyne.CanvasObject{r.appIcon, r.titleText, r.closeBg, r.closeText}
+}
+
+func (r *titleBarRenderer) Destroy() {}
+
+// Mouse drag — fires on the non-close area of the title bar
+func (tb *TitleBar) MouseDown(ev *desktop.MouseEvent) {
+	if ev.Button == desktop.MouseButtonPrimary && ev.Position.X < tb.Size().Width-titleBarCloseWidth {
+		if tb.onDragStart != nil {
+			tb.onDragStart()
+		}
+	}
+}
+
+// Close click — fires when the mouse is released over the close icon area
+func (tb *TitleBar) MouseUp(ev *desktop.MouseEvent) {
+	if ev.Button == desktop.MouseButtonPrimary && ev.Position.X >= tb.Size().Width-titleBarCloseWidth {
+		if tb.onClose != nil {
+			tb.onClose()
+		}
+	}
+}
+
+// Hover tracking for close icon highlight
+func (tb *TitleBar) MouseIn(*desktop.MouseEvent) {}
+
+func (tb *TitleBar) MouseMoved(ev *desktop.MouseEvent) {
+	hovered := ev.Position.X >= tb.Size().Width-titleBarCloseWidth
+	if hovered != tb.closeHovered {
+		tb.closeHovered = hovered
+		tb.Refresh()
+	}
+}
+
+func (tb *TitleBar) MouseOut() {
+	if tb.closeHovered {
+		tb.closeHovered = false
+		tb.Refresh()
+	}
 }

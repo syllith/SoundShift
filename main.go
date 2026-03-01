@@ -57,6 +57,7 @@ var screenWidth = int(win.GetSystemMetrics(win.SM_CXSCREEN))
 var screenHeight = int(win.GetSystemMetrics(win.SM_CYSCREEN))
 var taskbarHeight = winapi.GetTaskbarHeight()
 var hwnd windows.HWND
+var configHwnd windows.HWND
 var deviceVboxPlaceholder = container.New(&fyneCustom.CustomVBoxLayout{FixedWidth: 150})
 
 // . mu protects audioDevices and currentDeviceID which are accessed from multiple goroutines.
@@ -105,19 +106,18 @@ func withRecovery(name string, fn func()) {
 	}()
 }
 
-// . waitForHWNDByTitle waits for a valid window handle with timeout
-func waitForHWNDByTitle(pid uint32, title string, timeout time.Duration) error {
+// . waitForHWNDByTitle waits for a valid window handle with timeout and returns it
+func waitForHWNDByTitle(pid uint32, title string, timeout time.Duration) (windows.HWND, error) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		h, err := winapi.GetHwnd(pid, title)
 		if err == nil && h != 0 {
-			hwnd = h
-			general.LogError(fmt.Sprintf("HWND_ACQUIRED (hwnd=%d)", uintptr(h)), nil)
-			return nil
+			general.LogError(fmt.Sprintf("HWND_ACQUIRED (%s hwnd=%d)", title, uintptr(h)), nil)
+			return h, nil
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return fmt.Errorf("timeout acquiring hwnd")
+	return 0, fmt.Errorf("timeout acquiring hwnd for %q", title)
 }
 
 // . toggleWindow toggles the main window visibility
@@ -219,6 +219,15 @@ func init() {
 			configWin.CenterOnScreen()
 			configWindowOpen.Store(true)
 			configButton.Disable()
+			if configHwnd == 0 {
+				go func() {
+					h, err := waitForHWNDByTitle(windows.GetCurrentProcessId(), "Configure", 3*time.Second)
+					if err == nil {
+						configHwnd = h
+						winapi.EnableAcrylic(h)
+					}
+				}()
+			}
 		}
 	}
 
@@ -281,8 +290,16 @@ func main() {
 	//* Configure application theme
 	App.Settings().SetTheme(fyneTheme.CustomTheme{})
 
+	//* Build custom title bar with unified drag, alignment, and close hover effect
+	titleBar := fyneCustom.NewTitleBar(
+		fyne.NewStaticResource("icon", icon),
+		"SoundShift",
+		func() { winapi.HideWindow(hwnd) },
+		func() { winapi.StartWindowDrag(hwnd) },
+	)
+
 	//* Configure main window properties and layout
-	Win.SetContent(mainView)
+	Win.SetContent(container.NewBorder(titleBar, nil, nil, nil, mainView))
 	Win.SetTitle(title)
 	Win.SetIcon(fyne.NewStaticResource("icon", icon))
 	Win.SetCloseIntercept(func() {
@@ -303,17 +320,21 @@ func main() {
 	Win.Show()
 
 	//* Wait for a valid window handle with timeout
-	if err := waitForHWNDByTitle(pid, title, 5*time.Second); err != nil {
+	h, err := waitForHWNDByTitle(pid, title, 5*time.Second)
+	if err != nil {
 		general.LogError("Failed to acquire HWND", err)
 		return
 	}
+	hwnd = h
 
 	//* Apply Windows API settings to the application window
+	winapi.HideTitleBar(hwnd) // remove native chrome before resize so MinSize is correct
 	resize()
 	winapi.HideWindow(hwnd)
 	winapi.HideMinMaxButtons(hwnd)
 	winapi.HideWindowFromTaskbar(hwnd)
 	winapi.SetTopmost(hwnd)
+	winapi.EnableAcrylic(hwnd)
 
 	//* Start systray on a locked OS thread
 	go func() {
@@ -640,7 +661,7 @@ func genConfigForm() fyne.CanvasObject {
 		}
 
 		//* Create a reset button to revert the name to the original device name
-		resetButton := fyneCustom.NewColorButton("", color.RGBA{68, 72, 81, 255}, theme.MediaReplayIcon(), func() {
+		resetButton := fyneCustom.NewColorButton("", color.RGBA{68, 72, 81, 192}, theme.MediaReplayIcon(), func() {
 			newNameEntry.SetText(config.OriginalName)
 		})
 		newNameEntry.ActionItem = resetButton
@@ -929,6 +950,12 @@ func monitorDeviceChanges() {
 			lastMuted = muted
 
 			fyne.Do(func() {
+				// Skip external updates while the user is dragging the slider so the
+				// ticker cannot snap the thumb back mid-drag (which caused the visible
+				// "back and forth" oscillation).
+				if volumeSlider.IsDragging() {
+					return
+				}
 				if muted {
 					volumeSlider.SetValue(0)
 				} else {
