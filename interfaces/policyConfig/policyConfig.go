@@ -123,14 +123,12 @@ func SetVolume(deviceID string, volumeLevel float32) error {
 
 	//* Create an instance of the device enumerator to access audio devices
 	if err := wca.CoCreateInstance(wca.CLSID_MMDeviceEnumerator, 0, wca.CLSCTX_ALL, wca.IID_IMMDeviceEnumerator, &deviceEnumerator); err != nil {
-		//! Return an error if unable to create the device enumerator instance
 		return fmt.Errorf("failed to create device enumerator instance: %w", err)
 	}
 	defer deviceEnumerator.Release()
 
 	//* Enumerate active audio rendering devices
 	if err := deviceEnumerator.EnumAudioEndpoints(wca.ERender, wca.DEVICE_STATE_ACTIVE, &deviceCollection); err != nil {
-		//! Return an error if unable to enumerate audio endpoints
 		return fmt.Errorf("failed to enumerate audio endpoints: %w", err)
 	}
 	defer deviceCollection.Release()
@@ -138,7 +136,6 @@ func SetVolume(deviceID string, volumeLevel float32) error {
 	//* Get the count of available audio devices
 	var count uint32
 	if err := deviceCollection.GetCount(&count); err != nil {
-		//! Return an error if unable to retrieve the count of devices
 		return fmt.Errorf("failed to get count of devices: %w", err)
 	}
 
@@ -146,37 +143,36 @@ func SetVolume(deviceID string, volumeLevel float32) error {
 	for i := uint32(0); i < count; i++ {
 		var device *wca.IMMDevice
 		if err := deviceCollection.Item(i, &device); err != nil {
-			//. Skip to next device if unable to retrieve this one
 			continue
 		}
-		defer device.Release()
 
-		//* Retrieve the unique identifier for the device
 		var id string
 		if err := device.GetId(&id); err != nil {
-			//. Skip to next device if unable to get ID
+			device.Release()
 			continue
 		}
 
-		//* Check if the current device matches the specified deviceID
-		if id == deviceID {
-			//* Activate the audio endpoint volume interface for volume control
-			if err := device.Activate(wca.IID_IAudioEndpointVolume, wca.CLSCTX_ALL, nil, &audioEndpointVolume); err != nil {
-				//! Return an error if unable to activate the endpoint volume interface
-				return fmt.Errorf("failed to activate endpoint volume interface for device %s: %w", deviceID, err)
-			}
-			defer audioEndpointVolume.Release()
-
-			//* Set the master volume level for the device
-			if err := audioEndpointVolume.SetMasterVolumeLevelScalar(volumeLevel, nil); err != nil {
-				//! Return an error if setting the volume level fails
-				return fmt.Errorf("failed to set volume level for device %s: %w", deviceID, err)
-			}
-			break // Exit loop once the volume has been set for the specified device
+		if id != deviceID {
+			device.Release()
+			continue
 		}
+
+		// Found the matching device — release when done
+		defer device.Release()
+
+		//* Activate the audio endpoint volume interface for volume control
+		if err := device.Activate(wca.IID_IAudioEndpointVolume, wca.CLSCTX_ALL, nil, &audioEndpointVolume); err != nil {
+			return fmt.Errorf("failed to activate endpoint volume interface for device %s: %w", deviceID, err)
+		}
+		defer audioEndpointVolume.Release()
+
+		//* Set the master volume level for the device
+		if err := audioEndpointVolume.SetMasterVolumeLevelScalar(volumeLevel, nil); err != nil {
+			return fmt.Errorf("failed to set volume level for device %s: %w", deviceID, err)
+		}
+		return nil
 	}
 
-	//* Volume level successfully set for the specified device
 	return nil
 }
 
@@ -188,14 +184,12 @@ func GetVolume(deviceID string) (float32, error) {
 
 	//* Create an instance of the device enumerator to access audio devices
 	if err := wca.CoCreateInstance(wca.CLSID_MMDeviceEnumerator, 0, wca.CLSCTX_ALL, wca.IID_IMMDeviceEnumerator, &deviceEnumerator); err != nil {
-		//! Return an error if unable to create the device enumerator instance
 		return 0, fmt.Errorf("failed to create device enumerator instance: %w", err)
 	}
 	defer deviceEnumerator.Release()
 
 	//* Enumerate active audio rendering devices
 	if err := deviceEnumerator.EnumAudioEndpoints(wca.ERender, wca.DEVICE_STATE_ACTIVE, &deviceCollection); err != nil {
-		//! Return an error if unable to enumerate audio endpoints
 		return 0, fmt.Errorf("failed to enumerate audio endpoints: %w", err)
 	}
 	defer deviceCollection.Release()
@@ -203,7 +197,6 @@ func GetVolume(deviceID string) (float32, error) {
 	//* Get the count of available audio devices
 	var count uint32
 	if err := deviceCollection.GetCount(&count); err != nil {
-		//! Return an error if unable to retrieve the count of devices
 		return 0, fmt.Errorf("failed to get count of devices: %w", err)
 	}
 
@@ -211,39 +204,37 @@ func GetVolume(deviceID string) (float32, error) {
 	for i := uint32(0); i < count; i++ {
 		var device *wca.IMMDevice
 		if err := deviceCollection.Item(i, &device); err != nil {
-			//. Skip to next device if unable to retrieve this one
 			continue
 		}
-		defer device.Release()
 
-		//* Retrieve the unique identifier for the device
 		var id string
 		if err := device.GetId(&id); err != nil {
-			//. Skip to next device if unable to get ID
+			device.Release()
 			continue
 		}
 
-		//* Check if the current device matches the specified deviceID
-		if id == deviceID {
-			//* Activate the audio endpoint volume interface to access the volume level
-			if err := device.Activate(wca.IID_IAudioEndpointVolume, wca.CLSCTX_ALL, nil, &audioEndpointVolume); err != nil {
-				//! Return an error if unable to activate the endpoint volume interface
-				return 0, fmt.Errorf("failed to activate endpoint volume interface for device %s: %w", deviceID, err)
-			}
-			defer audioEndpointVolume.Release()
-
-			//* Retrieve the current volume level for the device
-			var currentVolume float32
-			if err := audioEndpointVolume.GetMasterVolumeLevelScalar(&currentVolume); err != nil {
-				//! Return an error if unable to get the volume level
-				return 0, fmt.Errorf("failed to get volume level for device %s: %w", deviceID, err)
-			}
-			//* Return the retrieved volume level
-			return currentVolume, nil
+		if id != deviceID {
+			device.Release()
+			continue
 		}
+
+		// Found the matching device — release when done
+		defer device.Release()
+
+		//* Activate the audio endpoint volume interface to access the volume level
+		if err := device.Activate(wca.IID_IAudioEndpointVolume, wca.CLSCTX_ALL, nil, &audioEndpointVolume); err != nil {
+			return 0, fmt.Errorf("failed to activate endpoint volume interface for device %s: %w", deviceID, err)
+		}
+		defer audioEndpointVolume.Release()
+
+		//* Retrieve the current volume level for the device
+		var currentVolume float32
+		if err := audioEndpointVolume.GetMasterVolumeLevelScalar(&currentVolume); err != nil {
+			return 0, fmt.Errorf("failed to get volume level for device %s: %w", deviceID, err)
+		}
+		return currentVolume, nil
 	}
 
-	//! Return an error if the specified deviceID is not found
 	return 0, fmt.Errorf("device not found")
 }
 
@@ -276,28 +267,34 @@ func GetMute(deviceID string) (bool, error) {
 		if err := deviceCollection.Item(i, &device); err != nil {
 			continue
 		}
-		defer device.Release()
 
 		var id string
 		if err := device.GetId(&id); err != nil {
+			device.Release()
 			continue
 		}
 
-		if id == deviceID {
-			// Activate the IAudioEndpointVolume interface.
-			if err := device.Activate(wca.IID_IAudioEndpointVolume, wca.CLSCTX_ALL, nil, &audioEndpointVolume); err != nil {
-				return false, fmt.Errorf("failed to activate endpoint volume interface for device %s: %w", deviceID, err)
-			}
-			defer audioEndpointVolume.Release()
-
-			// Retrieve the mute state.
-			var isMuted bool
-			if err := audioEndpointVolume.GetMute(&isMuted); err != nil {
-				return false, fmt.Errorf("failed to get mute state for device %s: %w", deviceID, err)
-			}
-
-			return isMuted, nil
+		if id != deviceID {
+			device.Release()
+			continue
 		}
+
+		// Found the matching device — release when done
+		defer device.Release()
+
+		// Activate the IAudioEndpointVolume interface.
+		if err := device.Activate(wca.IID_IAudioEndpointVolume, wca.CLSCTX_ALL, nil, &audioEndpointVolume); err != nil {
+			return false, fmt.Errorf("failed to activate endpoint volume interface for device %s: %w", deviceID, err)
+		}
+		defer audioEndpointVolume.Release()
+
+		// Retrieve the mute state.
+		var isMuted bool
+		if err := audioEndpointVolume.GetMute(&isMuted); err != nil {
+			return false, fmt.Errorf("failed to get mute state for device %s: %w", deviceID, err)
+		}
+
+		return isMuted, nil
 	}
 
 	return false, fmt.Errorf("device with ID %s not found", deviceID)

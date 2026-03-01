@@ -48,7 +48,8 @@ func EllipticalTruncate(text string, maxLen int) string {
 }
 
 func CreateShortcut(src, dst string) error {
-	ole.CoInitializeEx(0, ole.COINIT_APARTMENTTHREADED|ole.COINIT_SPEED_OVER_MEMORY)
+	// COM is already initialized by the caller (main uses COINIT_MULTITHREADED).
+	// Re-initializing with a different apartment model here would conflict.
 	oleShellObject, err := oleutil.CreateObject("WScript.Shell")
 	if err != nil {
 		return err

@@ -15,6 +15,8 @@ import (
 	"soundshift/interfaces/mmDeviceEnumerator"
 	"soundshift/interfaces/policyConfig"
 	"soundshift/winapi"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/energye/systray"
@@ -47,7 +49,7 @@ type AppSettings struct {
 }
 
 // . Global variables for application state and configuration
-var configWindowOpen = false
+var configWindowOpen atomic.Bool // replaces plain bool; safe for concurrent read from goroutines
 var settings AppSettings
 var currentDeviceID string
 var audioDevices []mmDeviceEnumerator.AudioDevice
@@ -57,11 +59,50 @@ var taskbarHeight = winapi.GetTaskbarHeight()
 var hwnd windows.HWND
 var deviceVboxPlaceholder = container.New(&fyneCustom.CustomVBoxLayout{FixedWidth: 150})
 
+// . mu protects audioDevices and currentDeviceID which are accessed from multiple goroutines.
+// Rule: never hold mu while calling fyne.Do.
+var mu sync.Mutex
+
+// . singleInstanceMu holds the Windows named mutex for single-instance enforcement
+var singleInstanceMu windows.Handle
+
 // . Diagnostic logging functions
 func logSession(tag string) {
 	var sid uint32
 	windows.ProcessIdToSessionId(windows.GetCurrentProcessId(), &sid)
 	general.LogError(fmt.Sprintf("%s (session=%d)", tag, sid), nil)
+}
+
+// . acquireSingleInstance uses a named Windows mutex to ensure only one instance runs.
+// Returns true if this process is the first (and only) instance.
+func acquireSingleInstance() bool {
+	name, err := windows.UTF16PtrFromString("Global\\SoundShiftSingleInstance")
+	if err != nil {
+		// Fallback to process-name check if UTF16 conversion fails
+		return !general.IsProcRunning(title)
+	}
+	handle, err := windows.CreateMutex(nil, false, name)
+	if err == windows.ERROR_ALREADY_EXISTS {
+		return false
+	}
+	if err != nil {
+		// If mutex creation fails for any other reason, fall back
+		return !general.IsProcRunning(title)
+	}
+	singleInstanceMu = handle // Keep handle open for the lifetime of the process
+	return true
+}
+
+// . withRecovery runs fn in a new goroutine, logging any panic instead of crashing the process.
+func withRecovery(name string, fn func()) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				general.LogError(fmt.Sprintf("panic in %s", name), fmt.Errorf("%v", r))
+			}
+		}()
+		fn()
+	}()
 }
 
 // . waitForHWNDByTitle waits for a valid window handle with timeout
@@ -90,12 +131,10 @@ func toggleWindow() {
 		winapi.HideWindow(hwnd)
 	} else {
 		general.LogError("TOGGLE_SHOW", nil)
-		fyne.Do(func() {
-			refreshScreenMetrics()
-			resize()
-			winapi.ShowWindow(hwnd)
-			winapi.SetTopmost(hwnd)
-		})
+		// resize already calls refreshScreenMetrics internally — no need to call it twice
+		resize()
+		winapi.ShowWindow(hwnd)
+		winapi.SetTopmost(hwnd)
 	}
 }
 
@@ -104,7 +143,9 @@ func cleanExit() {
 	general.LogError("CLEAN_EXIT", nil)
 	mouse.Uninstall()
 	systray.Quit()
-	App.Quit()
+	fyne.Do(func() {
+		App.Quit()
+	})
 }
 
 //go:embed speaker.ico
@@ -137,40 +178,46 @@ func init() {
 	//* Set up volume slider callback to adjust volume when changed
 	volumeSlider.OnChanged = func(f float64) {
 		volumeScalar := float32(f / 100.0)
-		if currentDeviceID != "" {
-			// Skip setting volume for disabled slider (inaccessible Remote Audio)
-			if volumeSlider.Disabled {
-				return
-			}
 
-			// Check if this is Remote Audio and test accessibility before setting volume
-			for _, device := range audioDevices {
-				if device.Id == currentDeviceID && device.Name == "Remote Audio" {
-					// Test if Remote Audio is accessible before attempting to set volume
-					_, err := policyConfig.GetVolume(currentDeviceID)
-					if err != nil {
-						// Remote Audio is not accessible, don't try to set volume
-						return
-					}
-					break
+		mu.Lock()
+		devID := currentDeviceID
+		devices := make([]mmDeviceEnumerator.AudioDevice, len(audioDevices))
+		copy(devices, audioDevices)
+		mu.Unlock()
+
+		if devID == "" {
+			return
+		}
+
+		// Skip setting volume for disabled slider (inaccessible Remote Audio)
+		if volumeSlider.Disabled {
+			return
+		}
+
+		// Check if this is Remote Audio and test accessibility before setting volume
+		for _, device := range devices {
+			if device.Id == devID && device.Name == "Remote Audio" {
+				_, err := policyConfig.GetVolume(devID)
+				if err != nil {
+					return
 				}
+				break
 			}
+		}
 
-			if err := policyConfig.SetVolume(currentDeviceID, volumeScalar); err != nil {
-				fmt.Println("Error setting volume:", err)
-				general.LogError("Error setting volume:", err)
-			}
+		if err := policyConfig.SetVolume(devID, volumeScalar); err != nil {
+			fmt.Println("Error setting volume:", err)
+			general.LogError("Error setting volume:", err)
 		}
 	}
 
 	//* Configure the behavior of the config window and button
 	configWin = fyne.CurrentApp().NewWindow("Configure")
 	configButton.OnTapped = func() {
-		//* Open the config window and disable the button to prevent multiple instances
-		if !configWindowOpen {
+		if !configWindowOpen.Load() {
 			configWin.Show()
 			configWin.CenterOnScreen()
-			configWindowOpen = true
+			configWindowOpen.Store(true)
 			configButton.Disable()
 		}
 	}
@@ -178,7 +225,7 @@ func init() {
 	//* Handle config window close event to reset button state
 	configWin.SetCloseIntercept(func() {
 		configWin.Hide()
-		configWindowOpen = false
+		configWindowOpen.Store(false)
 		configButton.Enable()
 	})
 }
@@ -193,7 +240,7 @@ func resize() {
 	if hwnd == 0 {
 		return
 	}
-	refreshScreenMetrics() // <-- now recalculated each call
+	refreshScreenMetrics()
 
 	size := Win.Content().MinSize()
 	paddingX := int(float64(screenWidth) * 0.02)
@@ -213,8 +260,8 @@ func main() {
 	//* Log application start
 	logSession("APP_START")
 
-	//* Exit if an instance of the application is already running
-	if general.IsProcRunning(title) {
+	//* Exit if an instance of the application is already running (named-mutex check)
+	if !acquireSingleInstance() {
 		os.Exit(0)
 	}
 
@@ -248,9 +295,8 @@ func main() {
 	configWin.SetContent(genConfigForm())
 	configWin.Resize(fyne.NewSize(600, 500))
 	configWin.SetOnClosed(func() {
-		//* Re-enable config button when the config window is closed
 		configButton.Enable()
-		configWindowOpen = false
+		configWindowOpen.Store(false)
 	})
 
 	//* Show the main window initially to get the window handle
@@ -275,13 +321,33 @@ func main() {
 		systray.Run(initTray, func() {})
 	}()
 
-	//* Start background goroutines for handling clicks and device updates
-	go hideOnClick()
-	go updateDevices()
-	go monitorDeviceChanges()
+	//* Start background goroutines — wrapped in recovery so a panic logs and exits cleanly
+	withRecovery("hideOnClick", hideOnClick)
+	withRecovery("updateDevices", updateDevices)
+	withRecovery("monitorDeviceChanges", monitorDeviceChanges)
 
 	//* Run the application event loop
 	Win.ShowAndRun()
+}
+
+// . filterValidDevices filters out inaccessible devices while always including Remote Audio.
+func filterValidDevices(devices []mmDeviceEnumerator.AudioDevice) []mmDeviceEnumerator.AudioDevice {
+	valid := make([]mmDeviceEnumerator.AudioDevice, 0, len(devices))
+	var remoteAudio *mmDeviceEnumerator.AudioDevice
+	for _, device := range devices {
+		if device.Name == "Remote Audio" {
+			copy := device
+			remoteAudio = &copy
+			continue
+		}
+		if _, err := policyConfig.GetVolume(device.Id); err == nil {
+			valid = append(valid, device)
+		}
+	}
+	if remoteAudio != nil {
+		valid = append(valid, *remoteAudio)
+	}
+	return valid
 }
 
 // . checkAndUpdateDevices checks for changes in the list of audio devices and updates the UI if changes are detected
@@ -289,44 +355,29 @@ func checkAndUpdateDevices() {
 	//* Retrieve the current list of audio devices
 	newAudioDevices, err := mmDeviceEnumerator.GetDevices()
 	if err != nil || newAudioDevices == nil {
-		//! Log error if device retrieval fails
 		fmt.Println("Error getting audio devices:", err)
 		general.LogError("Error getting audio devices:", err)
 		return
 	}
 
-	// Filter out inaccessible devices, but always include Remote Audio
-	validDevices := make([]mmDeviceEnumerator.AudioDevice, 0, len(newAudioDevices))
-	var remoteAudio *mmDeviceEnumerator.AudioDevice = nil
-	for _, device := range newAudioDevices {
-		if device.Name == "Remote Audio" {
-			copy := device
-			remoteAudio = &copy
-			continue
-		}
-		_, err := policyConfig.GetVolume(device.Id)
-		if err == nil {
-			validDevices = append(validDevices, device)
-		}
-		// Don't log here since this runs every 3 seconds and would be too noisy
-	}
-	if remoteAudio != nil {
-		validDevices = append(validDevices, *remoteAudio)
-	}
+	validDevices := filterValidDevices(newAudioDevices)
 
-	//* Check if the list of devices has changed and config window is closed
-	if !audioDevicesEqual(audioDevices, validDevices) && !configWindowOpen {
-		//* Update audio devices if changes are detected
+	//* Check for changes and whether config window is open — hold lock briefly
+	mu.Lock()
+	changed := !audioDevicesEqual(audioDevices, validDevices)
+	open := configWindowOpen.Load()
+	if changed && !open {
 		audioDevices = validDevices
-
-		//* Reset currentDeviceID to prevent stale device references
 		currentDeviceID = ""
+	}
+	mu.Unlock()
 
-		loadSettings() // Reload settings to handle device ID changes
+	if changed && !open {
+		loadSettings()
 		fyne.Do(func() {
 			renderButtons()
-			resize()
 		})
+		resize()
 	}
 }
 
@@ -335,50 +386,46 @@ func updateDevices() {
 	// Force an immediate fresh device list retrieval on startup
 	freshDevices, err := mmDeviceEnumerator.GetDevices()
 	if err == nil && freshDevices != nil {
-		// Filter out any devices that can't be accessed, but always include Remote Audio
-		validDevices := make([]mmDeviceEnumerator.AudioDevice, 0, len(freshDevices))
-		var remoteAudio *mmDeviceEnumerator.AudioDevice = nil
-		for _, device := range freshDevices {
-			if device.Name == "Remote Audio" {
-				copy := device
-				remoteAudio = &copy
-				continue
-			}
-			_, err := policyConfig.GetVolume(device.Id)
-			if err == nil {
-				validDevices = append(validDevices, device)
-			} else {
-				fmt.Printf("Skipping inaccessible device %s (%s): %v\n", device.Name, device.Id, err)
-			}
-		}
-		if remoteAudio != nil {
-			validDevices = append(validDevices, *remoteAudio)
-		}
+		validDevices := filterValidDevices(freshDevices)
 
+		mu.Lock()
 		audioDevices = validDevices
+		mu.Unlock()
+
 		fyne.Do(func() {
 			renderButtons()
-			resize()
 		})
+		resize()
 	}
 
 	// Set up the ticker for subsequent device updates
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 
-	// Periodically check for audio device updates
 	for range ticker.C {
-		checkAndUpdateDevices() // Check and update device list every 3 seconds
+		checkAndUpdateDevices()
 	}
 }
 
-// . renderButtons dynamically creates and updates buttons for each audio device in the UI
+// . renderButtons dynamically creates and updates buttons for each audio device in the UI.
+// Must be called on the Fyne goroutine (directly or inside fyne.Do).
 func renderButtons() {
-	//* Create a new container for device buttons
+	//* Snapshot shared state under the lock so we don't hold it during UI work
+	mu.Lock()
+	devices := make([]mmDeviceEnumerator.AudioDevice, len(audioDevices))
+	copy(devices, audioDevices)
+	prevDeviceID := currentDeviceID
+	mu.Unlock()
+
 	newDeviceVbox := container.New(&fyneCustom.CustomVBoxLayout{FixedWidth: 150})
 
+	// Track the new device ID and slider state we will commit at the end
+	var newDeviceID string
+	newSliderDisabled := false
+	newSliderValue := float64(100)
+
 	//* Create a button for each audio device
-	for _, device := range audioDevices {
+	for _, device := range devices {
 		//* Retrieve device configuration (use defaults if config does not exist)
 		config, exists := settings.DeviceNames[device.Id]
 		if !exists {
@@ -406,22 +453,19 @@ func renderButtons() {
 					})
 					onTapped()
 				}))
-				// Try to get volume, but don't error if it fails
 				volume, err := policyConfig.GetVolume(device.Id)
 				if err == nil {
-					currentDeviceID = device.Id
-					volumeSlider.Disabled = false
-					volumeSlider.Enable()
-					volumeSlider.SetValue(float64(volume * 100))
-					muted, err := policyConfig.GetMute(currentDeviceID)
+					newDeviceID = device.Id
+					newSliderDisabled = false
+					newSliderValue = float64(volume * 100)
+					muted, err := policyConfig.GetMute(device.Id)
 					if err == nil && muted {
-						volumeSlider.SetValue(0)
+						newSliderValue = 0
 					}
 				} else {
-					currentDeviceID = device.Id // Still set so user can try
-					volumeSlider.Disabled = true
-					volumeSlider.Disable()
-					volumeSlider.SetValue(100)
+					newDeviceID = device.Id
+					newSliderDisabled = true
+					newSliderValue = 100
 				}
 			} else {
 				newDeviceVbox.Add(widget.NewButtonWithIcon(deviceName, theme.VolumeUpIcon(), onTapped))
@@ -429,14 +473,14 @@ func renderButtons() {
 				if err != nil {
 					fmt.Printf("Error getting volume for device %s: %v\n", device.Id, err)
 				} else {
-					currentDeviceID = device.Id
-					volumeSlider.Enable()
-					volumeSlider.SetValue(float64(volume * 100))
-					muted, err := policyConfig.GetMute(currentDeviceID)
+					newDeviceID = device.Id
+					newSliderDisabled = false
+					newSliderValue = float64(volume * 100)
+					muted, err := policyConfig.GetMute(device.Id)
 					if err != nil {
-						fmt.Printf("Error getting mute state for device %s: %v\n", currentDeviceID, err)
+						fmt.Printf("Error getting mute state for device %s: %v\n", device.Id, err)
 					} else if muted {
-						volumeSlider.SetValue(0)
+						newSliderValue = 0
 					}
 				}
 			}
@@ -449,17 +493,30 @@ func renderButtons() {
 					})
 					onTapped()
 				}))
-				// Always set slider to 100 and disable for non-default Remote Audio
-				if currentDeviceID == device.Id {
-					volumeSlider.Disabled = true
-					volumeSlider.Disable()
-					volumeSlider.SetValue(100)
+				// If Remote Audio was the previously selected device, keep slider disabled
+				if prevDeviceID == device.Id {
+					newSliderDisabled = true
+					newSliderValue = 100
 				}
 			} else {
 				newDeviceVbox.Add(widget.NewButton(deviceName, onTapped))
 			}
 		}
 	}
+
+	//* Commit the new device ID under the lock
+	mu.Lock()
+	currentDeviceID = newDeviceID
+	mu.Unlock()
+
+	//* Apply slider state
+	volumeSlider.Disabled = newSliderDisabled
+	if newSliderDisabled {
+		volumeSlider.Disable()
+	} else {
+		volumeSlider.Enable()
+	}
+	volumeSlider.SetValue(newSliderValue)
 
 	//* Refresh the container only once after adding all buttons
 	newDeviceVbox.Refresh()
@@ -474,7 +531,7 @@ func loadSettings() {
 	settingsPath := file.RoamingDir() + "/soundshift/settings.json"
 
 	//* Initialize settings with default values
-	settings = AppSettings{
+	newSettings := AppSettings{
 		HideAfterSelection: false,
 		DeviceNames:        make(map[string]DeviceConfig),
 	}
@@ -483,23 +540,23 @@ func loadSettings() {
 	fileData, err := os.ReadFile(settingsPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			//* Settings file does not exist; create a new one with default settings
+			settings = newSettings
 			saveSettings()
 		}
-		return // Exit if there's an error reading the file
+		return
 	}
 
 	//* Parse settings from JSON file data
-	json.Unmarshal(fileData, &settings)
+	json.Unmarshal(fileData, &newSettings)
 
 	//* Ensure DeviceNames map is initialized even if missing from file
-	if settings.DeviceNames == nil {
-		settings.DeviceNames = make(map[string]DeviceConfig)
+	if newSettings.DeviceNames == nil {
+		newSettings.DeviceNames = make(map[string]DeviceConfig)
 	}
 
 	//* Build a map linking original device names to their IDs for device ID consistency
-	originalNameToConfig := make(map[string]string) // Maps OriginalName to Device ID
-	for id, config := range settings.DeviceNames {
+	originalNameToConfig := make(map[string]string)
+	for id, config := range newSettings.DeviceNames {
 		originalNameToConfig[config.OriginalName] = id
 	}
 
@@ -516,17 +573,14 @@ func loadSettings() {
 
 	//* Update settings for each detected device, preserving configurations when possible
 	for _, device := range currentDevices {
-		config, exists := settings.DeviceNames[device.Id]
+		config, exists := newSettings.DeviceNames[device.Id]
 		if !exists {
-			//* Check if there’s an existing config with the same OriginalName but different ID
 			if oldID, found := originalNameToConfig[device.Name]; found {
-				//* Reassign the config to the new device ID
-				config = settings.DeviceNames[oldID]
+				config = newSettings.DeviceNames[oldID]
 				updatedDeviceNames[device.Id] = config
-				delete(settings.DeviceNames, oldID) // Remove old ID entry to prevent duplication
+				delete(newSettings.DeviceNames, oldID)
 				fmt.Printf("Updated device ID for %s from %s to %s\n", device.Name, oldID, device.Id)
 			} else {
-				//* No existing config for this device; create a default config
 				config = DeviceConfig{
 					Name:         device.Name,
 					IsShown:      true,
@@ -535,13 +589,14 @@ func loadSettings() {
 				updatedDeviceNames[device.Id] = config
 			}
 		} else {
-			//* Device ID exists in settings, so reuse the existing config
 			updatedDeviceNames[device.Id] = config
 		}
 	}
 
-	//* Update settings with the revised device configurations
-	settings.DeviceNames = updatedDeviceNames
+	newSettings.DeviceNames = updatedDeviceNames
+
+	//* Commit the fully built settings atomically
+	settings = newSettings
 }
 
 // . saveSettings saves the current settings to a JSON file in the user's roaming directory
@@ -571,7 +626,6 @@ func genConfigForm() fyne.CanvasObject {
 		//* Retrieve or initialize device configuration
 		config, exists := settings.DeviceNames[device.Id]
 		if !exists {
-			// . Config does not exist; initialize with default values
 			config = DeviceConfig{
 				Name:         device.Name,
 				IsShown:      true,
@@ -634,30 +688,29 @@ func genConfigForm() fyne.CanvasObject {
 		//* Manage application startup with Windows based on checkbox state
 		startupPath := file.RoamingDir() + "/Microsoft/Windows/Start Menu/Programs/Startup/soundshift.lnk"
 		if startWithWindowsCheckbox.Checked {
-			//* Create a startup shortcut if it doesn't exist
 			if !file.Exists(startupPath) {
 				general.CreateShortcut(file.Cwd()+"/soundshift.exe", startupPath)
 			}
 		} else {
-			//* Remove the startup shortcut if it exists
 			if file.Exists(startupPath) {
 				os.Remove(startupPath)
 			}
 		}
 
-		//* Update hide-after-selection setting
-		settings.HideAfterSelection = hideAfterSelectionCheckbox.Checked
-
 		//* Save settings to file and close the configuration window
 		saveSettings()
 		configWin.Hide()
-		configWindowOpen = false
+		configWindowOpen.Store(false)
 		configButton.Enable()
 
 		//* Refresh the main UI to reflect updated settings
 		renderButtons()
-		time.Sleep(100 * time.Millisecond)
-		resize()
+
+		//* Resize after a short delay to let the Fyne layout catch up — done off the UI goroutine
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			resize()
+		}()
 	})
 
 	//* Layout for save button and checkboxes
@@ -701,9 +754,9 @@ func initTray() {
 	})
 }
 
-// . hideOnClick hides the application window if a mouse click occurs outside of it, with debouncing
+// . hideOnClick hides the application window if a mouse click occurs outside of it
 func hideOnClick() {
-	mouseChan := make(chan types.MouseEvent, 1024) // Buffered channel to prevent blocking
+	mouseChan := make(chan types.MouseEvent, 1024)
 	mouse.Install(nil, mouseChan)
 	defer mouse.Uninstall()
 
@@ -711,7 +764,7 @@ func hideOnClick() {
 	for k := range mouseChan {
 		if k.Message == 513 { // WM_LBUTTONDOWN
 			//* Check if the click is outside the application window and taskbar
-			if !isMouseInWindow() && !isMouseInTaskbar() && !configWindowOpen {
+			if !isMouseInWindow() && !isMouseInTaskbar() && !configWindowOpen.Load() {
 				winapi.HideWindow(hwnd)
 			}
 		}
@@ -720,34 +773,26 @@ func hideOnClick() {
 
 // . isMouseInWindow checks if the mouse cursor is currently within the application window boundaries
 func isMouseInWindow() bool {
-	//* Get current mouse coordinates
 	xMouse, yMouse := robotgo.Location()
-	//* Get window position and size
 	xPos, yPos, _ := winapi.GetWindowPosition(hwnd)
 	xSize, ySize, _ := winapi.GetWindowSize(hwnd)
 
-	//* Check if mouse coordinates fall within window boundaries
 	return int(xMouse) >= int(xPos) && int(xMouse) <= int(xPos+xSize) &&
 		int(yMouse) >= int(yPos) && int(yMouse) <= int(yPos+ySize)
 }
 
 // . isMouseInTaskbar checks if the mouse cursor is currently within the taskbar area
 func isMouseInTaskbar() bool {
-	_, yMouse := robotgo.Location() // Get the Y coordinate of the mouse cursor
-	//* Get fresh screen height to handle display changes (remote desktop, monitor changes, etc.)
+	_, yMouse := robotgo.Location()
 	currentScreenHeight := int(win.GetSystemMetrics(win.SM_CYSCREEN))
-	//* Check if the mouse Y coordinate is within taskbar height from the bottom of the screen
 	return currentScreenHeight-yMouse <= winapi.GetTaskbarHeight()
 }
 
 // . audioDevicesEqual performs a fast comparison of AudioDevice slices without reflection
 func audioDevicesEqual(a, b []mmDeviceEnumerator.AudioDevice) bool {
-	// Quick length check first
 	if len(a) != len(b) {
 		return false
 	}
-
-	// Compare each device's properties directly
 	for i := range a {
 		if a[i].Name != b[i].Name ||
 			a[i].Id != b[i].Id ||
@@ -759,10 +804,9 @@ func audioDevicesEqual(a, b []mmDeviceEnumerator.AudioDevice) bool {
 }
 
 func monitorDeviceChanges() {
-	ticker := time.NewTicker(500 * time.Millisecond) // Poll every 500 ms
+	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
-	// Cache previous values to avoid unnecessary UI updates
 	var lastVolume float32 = -1
 	var lastMuted bool = false
 	var lastDeviceID string = ""
@@ -776,24 +820,30 @@ func monitorDeviceChanges() {
 			continue
 		}
 
-		// Skip if no device is selected
-		if currentDeviceID == "" {
+		// Read shared state under lock
+		mu.Lock()
+		devID := currentDeviceID
+		devices := make([]mmDeviceEnumerator.AudioDevice, len(audioDevices))
+		copy(devices, audioDevices)
+		mu.Unlock()
+
+		if devID == "" {
 			continue
 		}
 
 		// Reset cache if device changed
-		if currentDeviceID != lastDeviceID {
+		if devID != lastDeviceID {
 			lastVolume = -1
 			lastMuted = false
-			lastDeviceID = currentDeviceID
+			lastDeviceID = devID
 			isRemoteAudioInaccessible = false
 		}
 
 		// Validate that the current device still exists in the device list
 		deviceExists := false
 		var currentDevice mmDeviceEnumerator.AudioDevice
-		for _, device := range audioDevices {
-			if device.Id == currentDeviceID {
+		for _, device := range devices {
+			if device.Id == devID {
 				deviceExists = true
 				currentDevice = device
 				break
@@ -802,19 +852,21 @@ func monitorDeviceChanges() {
 
 		// If device no longer exists, reset currentDeviceID and skip monitoring
 		if !deviceExists {
-			fmt.Printf("Device %s no longer exists, resetting current device\n", currentDeviceID)
-			currentDeviceID = ""
+			fmt.Printf("Device %s no longer exists, resetting current device\n", devID)
+			mu.Lock()
+			if currentDeviceID == devID {
+				currentDeviceID = ""
+			}
+			mu.Unlock()
 			lastDeviceID = ""
 			continue
 		}
 
 		// Skip volume/mute polling for inaccessible Remote Audio devices
 		if currentDevice.Name == "Remote Audio" && !isRemoteAudioInaccessible {
-			// Test if Remote Audio is accessible on first check
-			_, err := policyConfig.GetVolume(currentDeviceID)
+			_, err := policyConfig.GetVolume(devID)
 			if err != nil {
 				isRemoteAudioInaccessible = true
-				// Set slider to disabled state and continue without further polling
 				fyne.Do(func() {
 					volumeSlider.Disabled = true
 					volumeSlider.Disable()
@@ -824,15 +876,13 @@ func monitorDeviceChanges() {
 			}
 		}
 
-		// Skip polling for inaccessible Remote Audio
 		if currentDevice.Name == "Remote Audio" && isRemoteAudioInaccessible {
 			continue
 		}
 
 		// Retrieve current volume and mute state
-		volume, err := policyConfig.GetVolume(currentDeviceID)
+		volume, err := policyConfig.GetVolume(devID)
 		if err != nil {
-			// For Remote Audio, mark as inaccessible and continue
 			if currentDevice.Name == "Remote Audio" {
 				isRemoteAudioInaccessible = true
 				fyne.Do(func() {
@@ -842,16 +892,18 @@ func monitorDeviceChanges() {
 				})
 				continue
 			}
-			fmt.Printf("Error getting volume for device %s: %v\n", currentDeviceID, err)
-			// Reset currentDeviceID if there's a persistent error for non-Remote Audio devices
-			currentDeviceID = ""
+			fmt.Printf("Error getting volume for device %s: %v\n", devID, err)
+			mu.Lock()
+			if currentDeviceID == devID {
+				currentDeviceID = ""
+			}
+			mu.Unlock()
 			lastDeviceID = ""
 			continue
 		}
 
-		muted, err := policyConfig.GetMute(currentDeviceID)
+		muted, err := policyConfig.GetMute(devID)
 		if err != nil {
-			// For Remote Audio, mark as inaccessible and continue
 			if currentDevice.Name == "Remote Audio" {
 				isRemoteAudioInaccessible = true
 				fyne.Do(func() {
@@ -861,9 +913,12 @@ func monitorDeviceChanges() {
 				})
 				continue
 			}
-			fmt.Printf("Error getting mute state for device %s: %v\n", currentDeviceID, err)
-			// Reset currentDeviceID if there's a persistent error for non-Remote Audio devices
-			currentDeviceID = ""
+			fmt.Printf("Error getting mute state for device %s: %v\n", devID, err)
+			mu.Lock()
+			if currentDeviceID == devID {
+				currentDeviceID = ""
+			}
+			mu.Unlock()
 			lastDeviceID = ""
 			continue
 		}
@@ -892,16 +947,30 @@ func createDeviceButtonHandler(deviceID string) func() {
 			general.LogError("Error setting default endpoint:", err)
 			return
 		}
-		// Wait for the system to update the default endpoint
-		time.Sleep(200 * time.Millisecond)
-		// Refresh device list and update UI accordingly
-		audioDevices, _ = mmDeviceEnumerator.GetDevices()
+
+		// Optimistically update IsDefault flags for immediate visual feedback
+		mu.Lock()
 		for i := range audioDevices {
 			audioDevices[i].IsDefault = (audioDevices[i].Id == deviceID)
 		}
+		mu.Unlock()
 		renderButtons()
-		if settings.HideAfterSelection {
-			winapi.HideWindow(hwnd)
-		}
+
+		// After OS has had time to settle, confirm with a fresh device list
+		go func() {
+			time.Sleep(200 * time.Millisecond)
+			newDevices, err := mmDeviceEnumerator.GetDevices()
+			if err == nil && newDevices != nil {
+				mu.Lock()
+				audioDevices = newDevices
+				mu.Unlock()
+				fyne.Do(func() {
+					renderButtons()
+				})
+			}
+			if settings.HideAfterSelection {
+				winapi.HideWindow(hwnd)
+			}
+		}()
 	}
 }
