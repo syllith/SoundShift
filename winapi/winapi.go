@@ -37,6 +37,7 @@ const (
 	// Accent / composition constants for DWM acrylic blur
 	ACCENT_ENABLE_ACRYLICBLURBEHIND = 4
 	WCA_ACCENT_POLICY               = 19
+	MONITOR_DEFAULTTONEAREST        = 2
 )
 
 // RECT defines a rectangle area used by Windows APIs for window positioning
@@ -45,6 +46,14 @@ type RECT struct {
 	Top    int32
 	Right  int32
 	Bottom int32
+}
+
+// MONITORINFO holds monitor and work-area rectangles.
+type MONITORINFO struct {
+	CbSize    uint32
+	RcMonitor RECT
+	RcWork    RECT
+	DwFlags   uint32
 }
 
 // AccentPolicy configures the DWM accent (blur/acrylic) applied to a window.
@@ -89,6 +98,8 @@ var (
 	procGetWindowRect            = user32dll.MustFindProc("GetWindowRect")
 	procGetSystemMetrics         = user32dll.MustFindProc("GetSystemMetrics")
 	procSystemParametersInfoW    = user32dll.MustFindProc("SystemParametersInfoW")
+	procMonitorFromRect          = user32dll.MustFindProc("MonitorFromRect")
+	procGetMonitorInfoW          = user32dll.MustFindProc("GetMonitorInfoW")
 )
 
 // . IntToUintptr converts an integer to uintptr, needed for negative constants in Windows API calls
@@ -204,6 +215,39 @@ func GetTaskbarHeight() int {
 	taskbarHeight := screenHeight - workAreaHeight
 
 	return int(taskbarHeight)
+}
+
+// . GetWorkArea returns the usable desktop area excluding taskbar/docked app bars.
+func GetWorkArea() (RECT, error) {
+	rect := RECT{}
+	r1, _, err := procSystemParametersInfoW.Call(SPI_GETWORKAREA, 0, uintptr(unsafe.Pointer(&rect)), 0)
+	if r1 != 1 {
+		return RECT{}, err
+	}
+	return rect, nil
+}
+
+// . GetWorkAreaFromPoint returns the work area of the monitor nearest to the given point.
+func GetWorkAreaFromPoint(x, y int32) (RECT, error) {
+	rect := RECT{Left: x, Top: y, Right: x + 1, Bottom: y + 1}
+	hMonitor, _, err := procMonitorFromRect.Call(uintptr(unsafe.Pointer(&rect)), uintptr(MONITOR_DEFAULTTONEAREST))
+	if hMonitor == 0 {
+		if err == nil {
+			err = errors.New("MonitorFromRect returned null monitor")
+		}
+		return RECT{}, err
+	}
+
+	mi := MONITORINFO{CbSize: uint32(unsafe.Sizeof(MONITORINFO{}))}
+	r1, _, err := procGetMonitorInfoW.Call(hMonitor, uintptr(unsafe.Pointer(&mi)))
+	if r1 == 0 {
+		if err == nil {
+			err = errors.New("GetMonitorInfoW failed")
+		}
+		return RECT{}, err
+	}
+
+	return mi.RcWork, nil
 }
 
 // . HideWindowFromTaskbar removes the window from the Windows taskbar by adjusting its extended window styles

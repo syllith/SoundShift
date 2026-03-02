@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"image/color"
+	"math"
 	"os"
 	"runtime"
 	"soundshift/colormap"
@@ -53,12 +54,16 @@ var configWindowOpen atomic.Bool // replaces plain bool; safe for concurrent rea
 var settings AppSettings
 var currentDeviceID string
 var audioDevices []mmDeviceEnumerator.AudioDevice
+var windowPadding = 20
 var screenWidth = int(win.GetSystemMetrics(win.SM_CXSCREEN))
 var screenHeight = int(win.GetSystemMetrics(win.SM_CYSCREEN))
 var taskbarHeight = winapi.GetTaskbarHeight()
 var hwnd windows.HWND
 var configHwnd windows.HWND
 var deviceVboxPlaceholder = container.New(&fyneCustom.CustomVBoxLayout{FixedWidth: 150})
+var placementAreaMu sync.RWMutex
+var placementArea winapi.RECT
+var placementAreaSet bool
 
 // . mu protects audioDevices and currentDeviceID which are accessed from multiple goroutines.
 // Rule: never hold mu while calling fyne.Do.
@@ -120,6 +125,28 @@ func waitForHWNDByTitle(pid uint32, title string, timeout time.Duration) (window
 	return 0, fmt.Errorf("timeout acquiring hwnd for %q", title)
 }
 
+func hideMainWindow() {
+	if hwnd != 0 {
+		winapi.HideWindow(hwnd)
+	}
+	fyne.Do(func() {
+		Win.Hide()
+	})
+}
+
+func showMainWindow() {
+	done := make(chan struct{})
+	fyne.Do(func() {
+		Win.Show()
+		close(done)
+	})
+	<-done
+	if hwnd != 0 {
+		winapi.ShowWindow(hwnd)
+		winapi.SetTopmost(hwnd)
+	}
+}
+
 // . toggleWindow toggles the main window visibility
 func toggleWindow() {
 	if hwnd == 0 {
@@ -128,13 +155,25 @@ func toggleWindow() {
 	}
 	if winapi.IsWindowVisible(hwnd) {
 		general.LogError("TOGGLE_HIDE", nil)
-		winapi.HideWindow(hwnd)
+		hideMainWindow()
 	} else {
 		general.LogError("TOGGLE_SHOW", nil)
-		// resize already calls refreshScreenMetrics internally — no need to call it twice
+		setPlacementAreaForCursor()
+
 		resize()
-		winapi.ShowWindow(hwnd)
-		winapi.SetTopmost(hwnd)
+		showMainWindow()
+		resize()
+
+		// Run several correction passes to handle late size adjustments on first show.
+		go func() {
+			for _, delay := range []time.Duration{0, 30 * time.Millisecond, 80 * time.Millisecond, 160 * time.Millisecond, 280 * time.Millisecond} {
+				time.Sleep(delay)
+				if !winapi.IsWindowVisible(hwnd) {
+					return
+				}
+				resize()
+			}
+		}()
 	}
 }
 
@@ -245,23 +284,99 @@ func refreshScreenMetrics() {
 	taskbarHeight = winapi.GetTaskbarHeight()
 }
 
+func setPlacementAreaForCursor() {
+	x, y := robotgo.Location()
+	workArea, err := winapi.GetWorkAreaFromPoint(int32(x), int32(y))
+	if err != nil {
+		return
+	}
+
+	placementAreaMu.Lock()
+	placementArea = workArea
+	placementAreaSet = true
+	placementAreaMu.Unlock()
+}
+
+func getPlacementArea() (winapi.RECT, bool) {
+	placementAreaMu.RLock()
+	defer placementAreaMu.RUnlock()
+	return placementArea, placementAreaSet
+}
+
+func positionWindow(physW, physH int32) {
+	if hwnd == 0 {
+		return
+	}
+	workArea, ok := getPlacementArea()
+	if !ok {
+		var err error
+		workArea, err = winapi.GetWorkArea()
+		if err != nil {
+			refreshScreenMetrics()
+			workArea = winapi.RECT{Left: 0, Top: 0, Right: int32(screenWidth), Bottom: int32(screenHeight - taskbarHeight)}
+		}
+	}
+
+	x := int(workArea.Right) - int(physW) - windowPadding
+	y := int(workArea.Bottom) - int(physH) - windowPadding
+
+	minX := int(workArea.Left)
+	minY := int(workArea.Top)
+	maxX := int(workArea.Right) - int(physW)
+	maxY := int(workArea.Bottom) - int(physH)
+
+	if maxX < minX {
+		maxX = minX
+	}
+	if maxY < minY {
+		maxY = minY
+	}
+	if x < minX {
+		x = minX
+	} else if x > maxX {
+		x = maxX
+	}
+	if y < minY {
+		y = minY
+	} else if y > maxY {
+		y = maxY
+	}
+
+	winapi.MoveWindow(
+		hwnd,
+		int32(x),
+		int32(y),
+		physW,
+		physH,
+	)
+}
+
+func resizeOnUI() {
+	size := Win.Content().MinSize()
+	scale := float64(1)
+	if Win.Canvas() != nil {
+		scale = float64(Win.Canvas().Scale())
+	}
+	physW := int32(math.Ceil(float64(size.Width) * scale))
+	physH := int32(math.Ceil(float64(size.Height) * scale))
+	positionWindow(physW, physH)
+
+	actualW, actualH, err := winapi.GetWindowSize(hwnd)
+	if err == nil && actualW > 0 && actualH > 0 && (actualW != physW || actualH != physH) {
+		positionWindow(actualW, actualH)
+	}
+}
+
 func resize() {
 	if hwnd == 0 {
 		return
 	}
-	refreshScreenMetrics()
-
-	size := Win.Content().MinSize()
-	paddingX := int(float64(screenWidth) * 0.02)
-	paddingY := int(float64(screenHeight) * 0.05)
-
-	winapi.MoveWindow(
-		hwnd,
-		int32(screenWidth-int(size.Width)-paddingX),
-		int32(screenHeight-int(size.Height)-paddingY-taskbarHeight),
-		int32(size.Width),
-		int32(size.Height),
-	)
+	done := make(chan struct{})
+	fyne.Do(func() {
+		resizeOnUI()
+		close(done)
+	})
+	<-done
 }
 
 // . main initializes the application, sets up the UI and systray, and manages application lifecycle events.
@@ -294,7 +409,7 @@ func main() {
 	titleBar := fyneCustom.NewTitleBar(
 		fyne.NewStaticResource("icon", icon),
 		"SoundShift",
-		func() { winapi.HideWindow(hwnd) },
+		func() { hideMainWindow() },
 		func() { winapi.StartWindowDrag(hwnd) },
 	)
 
@@ -304,7 +419,7 @@ func main() {
 	Win.SetIcon(fyne.NewStaticResource("icon", icon))
 	Win.SetCloseIntercept(func() {
 		//* Intercept window close to hide it instead of terminating the app
-		winapi.HideWindow(hwnd)
+		hideMainWindow()
 	})
 
 	//* Configure config window properties and layout
@@ -331,10 +446,27 @@ func main() {
 	winapi.HideTitleBar(hwnd) // remove native chrome before resize so MinSize is correct
 	resize()
 	winapi.HideWindow(hwnd)
+	done := make(chan struct{})
+	fyne.Do(func() {
+		Win.Hide()
+		close(done)
+	})
+	<-done
 	winapi.HideMinMaxButtons(hwnd)
 	winapi.HideWindowFromTaskbar(hwnd)
 	winapi.SetTopmost(hwnd)
 	winapi.EnableAcrylic(hwnd)
+
+	// Pre-settle placement while hidden so the very first user-visible show opens correctly.
+	go func() {
+		for _, delay := range []time.Duration{40 * time.Millisecond, 120 * time.Millisecond, 250 * time.Millisecond, 450 * time.Millisecond} {
+			time.Sleep(delay)
+			if hwnd == 0 {
+				return
+			}
+			resize()
+		}
+	}()
 
 	//* Start systray on a locked OS thread
 	go func() {
@@ -397,8 +529,10 @@ func checkAndUpdateDevices() {
 		loadSettings()
 		fyne.Do(func() {
 			renderButtons()
+			if winapi.IsWindowVisible(hwnd) {
+				resizeOnUI()
+			}
 		})
-		resize()
 	}
 }
 
@@ -415,8 +549,10 @@ func updateDevices() {
 
 		fyne.Do(func() {
 			renderButtons()
+			if winapi.IsWindowVisible(hwnd) {
+				resizeOnUI()
+			}
 		})
-		resize()
 	}
 
 	// Set up the ticker for subsequent device updates
@@ -730,7 +866,11 @@ func genConfigForm() fyne.CanvasObject {
 		//* Resize after a short delay to let the Fyne layout catch up — done off the UI goroutine
 		go func() {
 			time.Sleep(100 * time.Millisecond)
-			resize()
+			fyne.Do(func() {
+				if winapi.IsWindowVisible(hwnd) {
+					resizeOnUI()
+				}
+			})
 		}()
 	})
 
@@ -786,7 +926,7 @@ func hideOnClick() {
 		if k.Message == 513 { // WM_LBUTTONDOWN
 			//* Check if the click is outside the application window and taskbar
 			if !isMouseInWindow() && !isMouseInTaskbar() && !configWindowOpen.Load() {
-				winapi.HideWindow(hwnd)
+				hideMainWindow()
 			}
 		}
 	}
@@ -996,7 +1136,7 @@ func createDeviceButtonHandler(deviceID string) func() {
 				})
 			}
 			if settings.HideAfterSelection {
-				winapi.HideWindow(hwnd)
+				hideMainWindow()
 			}
 		}()
 	}
