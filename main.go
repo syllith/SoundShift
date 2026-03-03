@@ -154,18 +154,18 @@ func showMainWindow() {
 			mainView.ScrollToTop()
 		})
 	}
-	done := make(chan struct{})
-	fyne.Do(func() {
-		Win.Show()
-		close(done)
-	})
-	<-done
 	if hwnd != 0 {
 		winapi.ShowWindow(hwnd)
 		winapi.SetTopmost(hwnd)
 		// Apply rounded corners after showing the window
 		winapi.SetRoundedCorners(hwnd, 20)
 	}
+	done := make(chan struct{})
+	fyne.Do(func() {
+		Win.Show()
+		close(done)
+	})
+	<-done
 }
 
 // . toggleWindow toggles the main window visibility
@@ -189,9 +189,9 @@ func toggleWindow() {
 		general.LogError("TOGGLE_SHOW", nil)
 		setPlacementAreaForCursor()
 
+		// Position the window before showing it to minimize flicker
 		resize()
 		showMainWindow()
-		resize()
 
 		// Run several correction passes to handle late size adjustments on first show.
 		go func() {
@@ -385,7 +385,8 @@ func positionWindow(physW, physH int32) {
 		y = maxY
 	}
 
-	winapi.MoveWindow(
+	// Use optimized positioning to minimize flicker during frequent repositioning
+	winapi.PositionWindowOptimized(
 		hwnd,
 		int32(x),
 		int32(y),

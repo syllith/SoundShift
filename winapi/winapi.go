@@ -25,6 +25,7 @@ const (
 	SWP_NOSIZE       = 0x0001
 	SWP_NOMOVE       = 0x0002
 	SWP_NOZORDER     = 0x0004
+	SWP_NOACTIVATE   = 0x0010
 	SWP_FRAMECHANGED = 0x0020
 
 	WS_THICKFRAME = 0x00040000 // resize border — must be removed alongside WS_CAPTION
@@ -200,6 +201,14 @@ func StartWindowDrag(hwnd windows.HWND) {
 // . MoveWindow relocates and resizes the specified window to the given position and dimensions
 func MoveWindow(hwnd windows.HWND, x, y, width, height int32) {
 	procMoveWindow.Call(uintptr(hwnd), uintptr(x), uintptr(y), uintptr(width), uintptr(height), uintptr(1))
+}
+
+// . PositionWindowOptimized relocates and resizes the window while minimizing redraws.
+// Use this when the window is being repositioned frequently (e.g., on first show).
+func PositionWindowOptimized(hwnd windows.HWND, x, y, width, height int32) {
+	// Use SWP_NOACTIVATE to prevent the window from being activated, which reduces flicker.
+	// SWP_NOZORDER maintains the z-order without unnecessary processing.
+	procSetWindowPos.Call(uintptr(hwnd), 0, uintptr(x), uintptr(y), uintptr(width), uintptr(height), SWP_NOACTIVATE|SWP_NOZORDER)
 }
 
 // . GetTaskbarHeight returns the current height of the Windows taskbar
