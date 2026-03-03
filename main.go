@@ -1,14 +1,16 @@
 package main
 
 import (
+	"bytes"
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"image"
 	"image/color"
+	"image/png"
 	"math"
 	"os"
 	"runtime"
-	"soundshift/colormap"
 	"soundshift/file"
 	"soundshift/fyneCustom"
 	"soundshift/fyneTheme"
@@ -16,9 +18,12 @@ import (
 	"soundshift/interfaces/mmDeviceEnumerator"
 	"soundshift/interfaces/policyConfig"
 	"soundshift/winapi"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/energye/systray"
 	"github.com/go-ole/go-ole"
@@ -45,11 +50,14 @@ type DeviceConfig struct {
 }
 
 type AppSettings struct {
-	HideAfterSelection bool
-	DeviceNames        map[string]DeviceConfig
+	HideAfterSelection     bool
+	RememberScrollPosition bool
+	HiddenApps             map[string]bool // key = lowercase exe name (e.g. "firefox")
+	DeviceNames            map[string]DeviceConfig
 }
 
 // . Global variables for application state and configuration
+var lastHideTime atomic.Int64    // unix-nano timestamp of last hideMainWindow call
 var configWindowOpen atomic.Bool // replaces plain bool; safe for concurrent read from goroutines
 var settings AppSettings
 var currentDeviceID string
@@ -127,6 +135,11 @@ func waitForHWNDByTitle(pid uint32, title string, timeout time.Duration) (window
 
 func hideMainWindow() {
 	if hwnd != 0 {
+		// Only record the hide timestamp when actually hiding a visible window,
+		// so the debounce in toggleWindow doesn't suppress a legitimate show.
+		if winapi.IsWindowVisible(hwnd) {
+			lastHideTime.Store(time.Now().UnixNano())
+		}
 		winapi.HideWindow(hwnd)
 	}
 	fyne.Do(func() {
@@ -135,6 +148,12 @@ func hideMainWindow() {
 }
 
 func showMainWindow() {
+	// Scroll to top unless the user opted to remember scroll position.
+	if !settings.RememberScrollPosition {
+		fyne.Do(func() {
+			mainView.ScrollToTop()
+		})
+	}
 	done := make(chan struct{})
 	fyne.Do(func() {
 		Win.Show()
@@ -144,6 +163,8 @@ func showMainWindow() {
 	if hwnd != 0 {
 		winapi.ShowWindow(hwnd)
 		winapi.SetTopmost(hwnd)
+		// Apply rounded corners after showing the window
+		winapi.SetRoundedCorners(hwnd, 20)
 	}
 }
 
@@ -157,6 +178,14 @@ func toggleWindow() {
 		general.LogError("TOGGLE_HIDE", nil)
 		hideMainWindow()
 	} else {
+		// If the window was hidden very recently (e.g. by the global mouse hook on
+		// the same physical click that triggered this tray-icon callback), don't
+		// immediately re-show it. This lets a single tray-icon click cleanly hide
+		// the window instead of hide-then-reshow.
+		if time.Since(time.Unix(0, lastHideTime.Load())) < 300*time.Millisecond {
+			general.LogError("TOGGLE_SHOW_SUPPRESSED", nil)
+			return
+		}
 		general.LogError("TOGGLE_SHOW", nil)
 		setPlacementAreaForCursor()
 
@@ -194,17 +223,30 @@ var App fyne.App = app.New()
 var Win fyne.Window = App.NewWindow(title)
 var configWin fyne.Window = App.NewWindow("Configure")
 
-// * Main view layout
-var mainView = container.NewPadded(
-	container.NewCenter(
-		container.NewVBox(
-			deviceVboxPlaceholder,
-			&canvas.Line{StrokeColor: colormap.Gray, StrokeWidth: 1},
-			configButton,
-			container.NewPadded(volumeSlider),
-		),
+// * Top section: device selector + master volume
+var topSection = container.NewCenter(
+	container.NewVBox(
+		deviceVboxPlaceholder,
+		&canvas.Line{StrokeColor: color.NRGBA{R: 0x30, G: 0x30, B: 0x30, A: 0xCC}, StrokeWidth: 1},
+		configButton,
+		container.NewPadded(volumeSlider),
 	),
 )
+
+// * Mixer section: per-app volume sliders
+var mixerVbox = container.NewVBox()
+var mixerSection = container.NewVBox() // populated when sessions exist
+
+// * Inner content: everything that can be scrolled
+var mainViewInner = container.NewPadded(
+	container.NewVBox(
+		topSection,
+		mixerSection,
+	),
+)
+
+// * Main view: scrollable wrapper
+var mainView = container.NewVScroll(mainViewInner)
 
 // * Configure button to open settings window
 var configButton = &widget.Button{Text: "Configure"}
@@ -320,10 +362,11 @@ func positionWindow(physW, physH int32) {
 	x := int(workArea.Right) - int(physW) - windowPadding
 	y := int(workArea.Bottom) - int(physH) - windowPadding
 
-	minX := int(workArea.Left)
-	minY := int(workArea.Top)
-	maxX := int(workArea.Right) - int(physW)
-	maxY := int(workArea.Bottom) - int(physH)
+	// Clamp bounds include the padding so the window never sits flush against an edge.
+	minX := int(workArea.Left) + windowPadding
+	minY := int(workArea.Top) + windowPadding
+	maxX := int(workArea.Right) - int(physW) - windowPadding
+	maxY := int(workArea.Bottom) - int(physH) - windowPadding
 
 	if maxX < minX {
 		maxX = minX
@@ -349,16 +392,34 @@ func positionWindow(physW, physH int32) {
 		physW,
 		physH,
 	)
+	winapi.SetRoundedCorners(hwnd, 20)
 }
 
+// maxWindowHeight is the maximum height (in dp) the window will grow to.
+// Content beyond this is reachable by scrolling.
+const maxWindowHeight float32 = 500
+
 func resizeOnUI() {
-	size := Win.Content().MinSize()
+	// Size the window to fit only the top section (device buttons + master
+	// slider). The mixer section lives below and is reachable by scrolling.
+	topSize := topSection.MinSize()
+
+	// Add title-bar height + padding from mainViewInner's NewPadded wrapper.
+	const titleBarH float32 = 34 // matches TitleBar.MinSize().Height
+	const padExtra float32 = 16  // NewPadded adds theme.Padding()*2 ≈ 8*2
+	totalW := topSize.Width + padExtra
+	totalH := topSize.Height + titleBarH + padExtra
+
+	if totalH > maxWindowHeight {
+		totalH = maxWindowHeight
+	}
+
 	scale := float64(1)
 	if Win.Canvas() != nil {
 		scale = float64(Win.Canvas().Scale())
 	}
-	physW := int32(math.Ceil(float64(size.Width) * scale))
-	physH := int32(math.Ceil(float64(size.Height) * scale))
+	physW := int32(math.Ceil(float64(totalW) * scale))
+	physH := int32(math.Ceil(float64(totalH) * scale))
 	positionWindow(physW, physH)
 
 	actualW, actualH, err := winapi.GetWindowSize(hwnd)
@@ -476,8 +537,10 @@ func main() {
 
 	//* Start background goroutines — wrapped in recovery so a panic logs and exits cleanly
 	withRecovery("hideOnClick", hideOnClick)
+	withRecovery("monitorFocusLoss", monitorFocusLoss)
 	withRecovery("updateDevices", updateDevices)
 	withRecovery("monitorDeviceChanges", monitorDeviceChanges)
+	withRecovery("monitorMixer", monitorMixer)
 
 	//* Run the application event loop
 	Win.ShowAndRun()
@@ -689,8 +752,10 @@ func loadSettings() {
 
 	//* Initialize settings with default values
 	newSettings := AppSettings{
-		HideAfterSelection: false,
-		DeviceNames:        make(map[string]DeviceConfig),
+		HideAfterSelection:     false,
+		RememberScrollPosition: false,
+		HiddenApps:             make(map[string]bool),
+		DeviceNames:            make(map[string]DeviceConfig),
 	}
 
 	//* Attempt to read the settings file from disk
@@ -709,6 +774,9 @@ func loadSettings() {
 	//* Ensure DeviceNames map is initialized even if missing from file
 	if newSettings.DeviceNames == nil {
 		newSettings.DeviceNames = make(map[string]DeviceConfig)
+	}
+	if newSettings.HiddenApps == nil {
+		newSettings.HiddenApps = make(map[string]bool)
 	}
 
 	//* Build a map linking original device names to their IDs for device ID consistency
@@ -819,10 +887,63 @@ func genConfigForm() fyne.CanvasObject {
 		Checked: settings.HideAfterSelection,
 	}
 
+	//* Checkbox for remembering scroll position on show
+	rememberScrollCheckbox := &widget.Check{
+		Text:    "Remember scroll position on show",
+		Checked: settings.RememberScrollPosition,
+	}
+
 	//* Checkbox for setting the application to start with Windows
 	startWithWindowsCheckbox := &widget.Check{
 		Text:    "Start with Windows",
 		Checked: file.Exists(file.RoamingDir() + "/Microsoft/Windows/Start Menu/Programs/Startup/soundshift.lnk"),
+	}
+
+	//* Hidden apps section — gather known app names from current sessions + saved hidden apps
+	knownApps := make(map[string]bool) // lowercase name → true
+	for name := range settings.HiddenApps {
+		knownApps[strings.ToLower(name)] = true
+	}
+	if currentSessions, err := policyConfig.GetAudioSessions(); err == nil {
+		for _, s := range currentSessions {
+			knownApps[strings.ToLower(s.Name)] = true
+		}
+	}
+	// Build sorted list and checkboxes
+	type hiddenAppEntry struct {
+		name     string
+		checkbox *widget.Check
+	}
+	var hiddenAppEntries []hiddenAppEntry
+	for name := range knownApps {
+		displayName := name
+		// Capitalize first letter for display
+		if len(displayName) > 0 {
+			displayName = strings.ToUpper(displayName[:1]) + displayName[1:]
+		}
+		isHidden := settings.HiddenApps[name]
+		cb := &widget.Check{
+			Text:    displayName,
+			Checked: isHidden,
+		}
+		hiddenAppEntries = append(hiddenAppEntries, hiddenAppEntry{name: name, checkbox: cb})
+	}
+	// Sort alphabetically
+	for i := 0; i < len(hiddenAppEntries); i++ {
+		for j := i + 1; j < len(hiddenAppEntries); j++ {
+			if hiddenAppEntries[i].name > hiddenAppEntries[j].name {
+				hiddenAppEntries[i], hiddenAppEntries[j] = hiddenAppEntries[j], hiddenAppEntries[i]
+			}
+		}
+	}
+	hiddenAppsBox := container.NewVBox()
+	if len(hiddenAppEntries) > 0 {
+		hiddenAppsLabel := canvas.NewText("Hide from mixer:", color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xb0})
+		hiddenAppsLabel.TextSize = 12
+		hiddenAppsBox.Add(hiddenAppsLabel)
+		for _, entry := range hiddenAppEntries {
+			hiddenAppsBox.Add(entry.checkbox)
+		}
 	}
 
 	//* Save button to apply and persist settings
@@ -841,6 +962,16 @@ func genConfigForm() fyne.CanvasObject {
 
 		//* Apply global settings based on checkbox states
 		settings.HideAfterSelection = hideAfterSelectionCheckbox.Checked
+		settings.RememberScrollPosition = rememberScrollCheckbox.Checked
+
+		//* Update hidden apps from checkboxes
+		newHiddenApps := make(map[string]bool)
+		for _, entry := range hiddenAppEntries {
+			if entry.checkbox.Checked {
+				newHiddenApps[entry.name] = true
+			}
+		}
+		settings.HiddenApps = newHiddenApps
 
 		//* Manage application startup with Windows based on checkbox state
 		startupPath := file.RoamingDir() + "/Microsoft/Windows/Start Menu/Programs/Startup/soundshift.lnk"
@@ -863,6 +994,10 @@ func genConfigForm() fyne.CanvasObject {
 		//* Refresh the main UI to reflect updated settings
 		renderButtons()
 
+		//* Force-rebuild the mixer so hidden-app changes take effect immediately
+		mixerSessionKeys = nil
+		refreshMixer()
+
 		//* Resize after a short delay to let the Fyne layout catch up — done off the UI goroutine
 		go func() {
 			time.Sleep(100 * time.Millisecond)
@@ -876,7 +1011,12 @@ func genConfigForm() fyne.CanvasObject {
 
 	//* Layout for save button and checkboxes
 	saveButtonContainer := container.New(layout.NewCenterLayout(), saveButton)
-	checkboxAndButtonVBox := container.NewVBox(hideAfterSelectionCheckbox, startWithWindowsCheckbox, saveButtonContainer)
+	checkboxAndButtonVBox := container.NewVBox(hideAfterSelectionCheckbox, rememberScrollCheckbox, startWithWindowsCheckbox)
+	if len(hiddenAppEntries) > 0 {
+		checkboxAndButtonVBox.Add(widget.NewSeparator())
+		checkboxAndButtonVBox.Add(hiddenAppsBox)
+	}
+	checkboxAndButtonVBox.Add(saveButtonContainer)
 	centeredCheckboxAndButtonContainer := container.New(layout.NewCenterLayout(), checkboxAndButtonVBox)
 
 	//* Create a padded border container for the form and additional settings
@@ -932,6 +1072,26 @@ func hideOnClick() {
 	}
 }
 
+// . monitorFocusLoss hides the window when it loses foreground status.
+// This catches cases the mouse hook misses, e.g. clicks inside fullscreen game windows
+// that use DirectInput/raw input and bypass the low-level mouse hook.
+func monitorFocusLoss() {
+	var wasForeground bool
+	for {
+		time.Sleep(100 * time.Millisecond)
+		if hwnd == 0 {
+			wasForeground = false
+			continue
+		}
+		fg := winapi.GetForegroundWindow()
+		isForeground := fg == hwnd || fg == configHwnd
+		if wasForeground && !isForeground && winapi.IsWindowVisible(hwnd) && !configWindowOpen.Load() {
+			hideMainWindow()
+		}
+		wasForeground = isForeground
+	}
+}
+
 // . isMouseInWindow checks if the mouse cursor is currently within the application window boundaries
 func isMouseInWindow() bool {
 	xMouse, yMouse := robotgo.Location()
@@ -942,11 +1102,19 @@ func isMouseInWindow() bool {
 		int(yMouse) >= int(yPos) && int(yMouse) <= int(yPos+ySize)
 }
 
-// . isMouseInTaskbar checks if the mouse cursor is currently within the taskbar area
+// . isMouseInTaskbar checks if the mouse cursor is currently within the taskbar area on any monitor
 func isMouseInTaskbar() bool {
-	_, yMouse := robotgo.Location()
-	currentScreenHeight := int(win.GetSystemMetrics(win.SM_CYSCREEN))
-	return currentScreenHeight-yMouse <= winapi.GetTaskbarHeight()
+	xMouse, yMouse := robotgo.Location()
+	workArea, err := winapi.GetWorkAreaFromPoint(int32(xMouse), int32(yMouse))
+	if err != nil {
+		// Fallback: primary-monitor check
+		currentScreenHeight := int(win.GetSystemMetrics(win.SM_CYSCREEN))
+		return currentScreenHeight-yMouse <= winapi.GetTaskbarHeight()
+	}
+	// Cursor is in the taskbar/docked-bar zone if it lies outside the work area
+	// of the nearest monitor (the work area excludes the taskbar).
+	mx, my := int32(xMouse), int32(yMouse)
+	return mx < workArea.Left || mx >= workArea.Right || my < workArea.Top || my >= workArea.Bottom
 }
 
 // . audioDevicesEqual performs a fast comparison of AudioDevice slices without reflection
@@ -1139,5 +1307,372 @@ func createDeviceButtonHandler(deviceID string) func() {
 				hideMainWindow()
 			}
 		}()
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Icon extraction from executables (Windows shell32 / gdi32)
+// ---------------------------------------------------------------------------
+
+var (
+	shell32DLL         = windows.NewLazySystemDLL("shell32.dll")
+	gdi32DLL           = windows.NewLazySystemDLL("gdi32.dll")
+	procExtractIconExW = shell32DLL.NewProc("ExtractIconExW")
+	procDestroyIcon    = windows.NewLazySystemDLL("user32.dll").NewProc("DestroyIcon")
+	procGetIconInfo    = windows.NewLazySystemDLL("user32.dll").NewProc("GetIconInfo")
+	procGetDIBits      = gdi32DLL.NewProc("GetDIBits")
+	procCreateCompatDC = gdi32DLL.NewProc("CreateCompatibleDC")
+	procDeleteDC       = gdi32DLL.NewProc("DeleteDC")
+	procDeleteObject   = gdi32DLL.NewProc("DeleteObject")
+	procGetObjectW     = gdi32DLL.NewProc("GetObjectW")
+)
+
+type bitmapStruct struct {
+	BmType       int32
+	BmWidth      int32
+	BmHeight     int32
+	BmWidthBytes int32
+	BmPlanes     uint16
+	BmBitsPixel  uint16
+	BmBits       uintptr
+}
+
+type bitmapInfoHeader struct {
+	BiSize          uint32
+	BiWidth         int32
+	BiHeight        int32
+	BiPlanes        uint16
+	BiBitCount      uint16
+	BiCompression   uint32
+	BiSizeImage     uint32
+	BiXPelsPerMeter int32
+	BiYPelsPerMeter int32
+	BiClrUsed       uint32
+	BiClrImportant  uint32
+}
+
+type iconInfo struct {
+	FIcon    int32
+	XHotspot uint32
+	YHotspot uint32
+	HbmMask  uintptr
+	HbmColor uintptr
+}
+
+// iconCache caches fyne.Resource icons by exe path to avoid repeated extraction.
+var iconCache sync.Map // map[string]fyne.Resource
+
+// extractAppIcon extracts the first icon from the executable at exePath and
+// returns it as a fyne.Resource (PNG). Returns nil on failure.
+func extractAppIcon(exePath string) fyne.Resource {
+	if exePath == "" {
+		return nil
+	}
+	// Check cache first.
+	if cached, ok := iconCache.Load(exePath); ok {
+		if cached == nil {
+			return nil
+		}
+		return cached.(fyne.Resource)
+	}
+
+	res := doExtractIcon(exePath)
+	iconCache.Store(exePath, res)
+	return res
+}
+
+func doExtractIcon(exePath string) fyne.Resource {
+	pathPtr, err := syscall.UTF16PtrFromString(exePath)
+	if err != nil {
+		return nil
+	}
+
+	var hIconLarge uintptr
+	ret, _, _ := procExtractIconExW.Call(
+		uintptr(unsafe.Pointer(pathPtr)),
+		0,
+		uintptr(unsafe.Pointer(&hIconLarge)),
+		0, // no small icon
+		1,
+	)
+	if ret == 0 || hIconLarge == 0 {
+		return nil
+	}
+	defer procDestroyIcon.Call(hIconLarge)
+
+	// Get icon info to access the color bitmap.
+	var ii iconInfo
+	r1, _, _ := procGetIconInfo.Call(hIconLarge, uintptr(unsafe.Pointer(&ii)))
+	if r1 == 0 {
+		return nil
+	}
+	if ii.HbmMask != 0 {
+		defer procDeleteObject.Call(ii.HbmMask)
+	}
+	if ii.HbmColor == 0 {
+		return nil
+	}
+	defer procDeleteObject.Call(ii.HbmColor)
+
+	// Get bitmap dimensions.
+	var bm bitmapStruct
+	procGetObjectW.Call(ii.HbmColor, unsafe.Sizeof(bm), uintptr(unsafe.Pointer(&bm)))
+	if bm.BmWidth == 0 || bm.BmHeight == 0 {
+		return nil
+	}
+
+	w, h := int(bm.BmWidth), int(bm.BmHeight)
+
+	// Prepare BITMAPINFOHEADER for GetDIBits (top-down by using negative height).
+	bih := bitmapInfoHeader{
+		BiSize:     uint32(unsafe.Sizeof(bitmapInfoHeader{})),
+		BiWidth:    int32(w),
+		BiHeight:   -int32(h), // negative = top-down
+		BiPlanes:   1,
+		BiBitCount: 32,
+	}
+
+	pixels := make([]byte, w*h*4)
+
+	hdc, _, _ := procCreateCompatDC.Call(0)
+	if hdc == 0 {
+		return nil
+	}
+	defer procDeleteDC.Call(hdc)
+
+	procGetDIBits.Call(
+		hdc,
+		ii.HbmColor,
+		0,
+		uintptr(h),
+		uintptr(unsafe.Pointer(&pixels[0])),
+		uintptr(unsafe.Pointer(&bih)),
+		0, // DIB_RGB_COLORS
+	)
+
+	// Convert BGRA → RGBA.
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			off := (y*w + x) * 4
+			img.SetRGBA(x, y, color.RGBA{
+				R: pixels[off+2],
+				G: pixels[off+1],
+				B: pixels[off+0],
+				A: pixels[off+3],
+			})
+		}
+	}
+
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		return nil
+	}
+
+	return fyne.NewStaticResource(exePath, buf.Bytes())
+}
+
+// . refreshMixer rebuilds the per-app volume mixer UI from current audio sessions.
+// Must be called on the Fyne goroutine.
+func refreshMixer() {
+	sessions, err := policyConfig.GetAudioSessions()
+	if err != nil {
+		mixerSection.Objects = nil
+		mixerSection.Refresh()
+		return
+	}
+
+	if len(sessions) == 0 {
+		mixerSection.Objects = nil
+		mixerSection.Refresh()
+		return
+	}
+
+	// Filter out apps the user has hidden via settings.
+	if len(settings.HiddenApps) > 0 {
+		filtered := sessions[:0]
+		for _, s := range sessions {
+			key := strings.ToLower(s.Name)
+			if !settings.HiddenApps[key] {
+				filtered = append(filtered, s)
+			}
+		}
+		sessions = filtered
+	}
+
+	if len(sessions) == 0 {
+		mixerSection.Objects = nil
+		mixerSection.Refresh()
+		return
+	}
+
+	// Build a key→session map for the new snapshot.
+	type sessionKey = struct {
+		pid   uint32
+		name  string
+		isSys bool
+	}
+	newKeys := make([]sessionKey, len(sessions))
+	for i, s := range sessions {
+		newKeys[i] = sessionKey{pid: s.PID, name: s.Name, isSys: s.IsSystem}
+	}
+
+	// Check if the set of sessions changed compared to last time.
+	sessionsChanged := len(newKeys) != len(mixerSessionKeys)
+	if !sessionsChanged {
+		for i := range newKeys {
+			if newKeys[i] != mixerSessionKeys[i] {
+				sessionsChanged = true
+				break
+			}
+		}
+	}
+
+	if sessionsChanged {
+		// Rebuild the entire mixer UI.
+		mixerSessionKeys = newKeys
+		mixerSliders = make([]*fyneCustom.ScrollableSlider, len(sessions))
+		mixerMuteButtons = make([]*fyneCustom.IconButton, len(sessions))
+		mixerMuted = make([]bool, len(sessions))
+
+		newMixer := container.NewVBox()
+
+		for i, sess := range sessions {
+			sessIdx := sess.SessionIdx
+			sessI := i
+			displayName := general.EllipticalTruncate(sess.Name, 24)
+
+			// --- App icon ---
+			var appIcon *canvas.Image
+			if iconRes := extractAppIcon(sess.ExePath); iconRes != nil {
+				appIcon = canvas.NewImageFromResource(iconRes)
+			} else {
+				// Fallback: use a generic speaker icon for system sounds or unknown apps
+				appIcon = canvas.NewImageFromResource(theme.VolumeUpIcon())
+			}
+			appIcon.FillMode = canvas.ImageFillContain
+			appIcon.SetMinSize(fyne.NewSize(16, 16))
+
+			// --- Name label ---
+			label := canvas.NewText(displayName, color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xd0})
+			label.TextSize = 11
+
+			// --- Mute button ---
+			muted := sess.Muted
+			mixerMuted[i] = muted
+			muteBtn := fyneCustom.NewIconButton(theme.VolumeMuteIcon(), nil)
+			muteBtn.SetActive(muted)
+			muteBtn.OnTapped = func() {
+				newMuted := !mixerMuted[sessI]
+				// Optimistic UI update — instant feedback before COM call completes
+				mixerMuted[sessI] = newMuted
+				muteBtn.SetActive(newMuted)
+				go func() {
+					if err := policyConfig.SetSessionMute(sessIdx, newMuted); err != nil {
+						general.LogError("Error setting session mute", err)
+					}
+				}()
+			}
+			mixerMuteButtons[i] = muteBtn
+
+			// --- Slider — always show the real underlying volume, mute is handled separately ---
+			slider := fyneCustom.NewScrollableSlider(0, 100)
+			slider.SetValue(float64(sess.Volume * 100))
+
+			slider.OnChanged = func(f float64) {
+				level := float32(f / 100.0)
+				go func() {
+					if err := policyConfig.SetSessionVolume(sessIdx, level); err != nil {
+						general.LogError("Error setting session volume", err)
+					}
+				}()
+			}
+
+			mixerSliders[i] = slider
+
+			// Layout: top row = [icon] name ... [muteBtn]
+			//         bottom  = slider (full width)
+			iconContainer := container.NewCenter(appIcon)
+			topRow := container.NewBorder(nil, nil,
+				container.NewHBox(iconContainer, label),
+				muteBtn,
+			)
+			entry := container.NewVBox(topRow, slider)
+			newMixer.Add(entry)
+		}
+
+		mixerSection.Objects = []fyne.CanvasObject{newMixer}
+		mixerSection.Refresh()
+
+		// Reposition the window after Fyne has had time to lay out the new
+		// mixer content. An immediate call would use stale dimensions; the
+		// delayed passes let Fyne settle first.
+		go func() {
+			for _, delay := range []time.Duration{50 * time.Millisecond, 150 * time.Millisecond, 300 * time.Millisecond} {
+				time.Sleep(delay)
+				if !winapi.IsWindowVisible(hwnd) {
+					return
+				}
+				fyne.Do(func() {
+					resizeOnUI()
+				})
+			}
+		}()
+	} else {
+		// Sessions haven't changed — just update slider values and mute state in-place.
+		for i, sess := range sessions {
+			if i >= len(mixerSliders) || mixerSliders[i] == nil {
+				continue
+			}
+			// Sync mute button active state if changed externally.
+			if i < len(mixerMuted) && i < len(mixerMuteButtons) && mixerMuteButtons[i] != nil {
+				if sess.Muted != mixerMuted[i] {
+					mixerMuted[i] = sess.Muted
+					mixerMuteButtons[i].SetActive(sess.Muted)
+				}
+			}
+			// Don't override the slider while the user is dragging it.
+			if mixerSliders[i].IsDragging() {
+				continue
+			}
+			// Always track the real underlying volume; mute state is shown separately.
+			target := float64(sess.Volume * 100)
+			if mixerSliders[i].Value != target {
+				mixerSliders[i].SetValue(target)
+			}
+		}
+	}
+}
+
+// mixer state tracking for in-place updates
+type mixerKey struct {
+	pid   uint32
+	name  string
+	isSys bool
+}
+
+var mixerSessionKeys []struct {
+	pid   uint32
+	name  string
+	isSys bool
+}
+var mixerSliders []*fyneCustom.ScrollableSlider
+var mixerMuteButtons []*fyneCustom.IconButton
+var mixerMuted []bool
+
+// . monitorMixer periodically refreshes the per-app mixer UI and updates slider
+// values to reflect external volume changes.
+func monitorMixer() {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		if !winapi.IsWindowVisible(hwnd) {
+			continue
+		}
+
+		fyne.Do(func() {
+			refreshMixer()
+		})
 	}
 }

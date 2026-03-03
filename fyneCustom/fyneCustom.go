@@ -27,36 +27,9 @@ func NewScrollableSlider(min, max float64) *ScrollableSlider {
 	return s
 }
 
-// . Scrolled adjusts the slider's value based on scroll events
-func (s *ScrollableSlider) Scrolled(ev *fyne.ScrollEvent) {
-	// Ignore scroll if disabled
-	if s.Disabled {
-		return
-	}
-	//* Define the increment amount as 1/20th of the slider's range
-	increment := (s.Max - s.Min) / 20 // Adjust increment as needed
-
-	//* Increase or decrease the slider value based on scroll direction
-	if ev.Scrolled.DY > 0 {
-		s.Value += increment
-	} else if ev.Scrolled.DY < 0 {
-		s.Value -= increment
-	}
-
-	//* Ensure the slider value stays within the defined min and max bounds
-	if s.Value > s.Max {
-		s.Value = s.Max
-	} else if s.Value < s.Min {
-		s.Value = s.Min
-	}
-
-	s.Refresh() // Update the slider display
-
-	//* Trigger the OnChanged callback if defined
-	if s.OnChanged != nil {
-		s.OnChanged(s.Value)
-	}
-}
+// NOTE: No Scrolled method — intentionally omitted so ScrollableSlider does NOT
+// satisfy fyne.Scrollable. This lets scroll events propagate to the parent
+// scroll container instead of being swallowed here.
 
 // . MouseDown records that the mouse button is held.
 // Tracking this ourselves is the key guard against phantom drag events.
@@ -429,6 +402,92 @@ func (tb *TitleBar) MouseDown(ev *desktop.MouseEvent) {
 		}
 	}
 }
+
+// . IconButton is a borderless icon-only button with hover feedback and an
+// optional "active" visual state (e.g. muted). Satisfies desktop.Hoverable.
+type IconButton struct {
+	widget.BaseWidget
+	Icon     fyne.Resource
+	OnTapped func()
+	Active   bool // when true renders a coloured background (e.g. muted)
+	hovered  bool
+}
+
+// . NewIconButton creates a new IconButton.
+func NewIconButton(icon fyne.Resource, tapped func()) *IconButton {
+	b := &IconButton{Icon: icon, OnTapped: tapped}
+	b.ExtendBaseWidget(b)
+	return b
+}
+
+// . SetActive updates the active state and redraws.
+func (b *IconButton) SetActive(active bool) {
+	b.Active = active
+	b.Refresh()
+}
+
+// . SetIcon updates the displayed icon and redraws.
+func (b *IconButton) SetIcon(icon fyne.Resource) {
+	b.Icon = icon
+	b.Refresh()
+}
+
+func (b *IconButton) MinSize() fyne.Size { return fyne.NewSize(22, 22) }
+
+func (b *IconButton) Tapped(*fyne.PointEvent) {
+	if b.OnTapped != nil {
+		b.OnTapped()
+	}
+}
+
+func (b *IconButton) MouseIn(*desktop.MouseEvent)    { b.hovered = true; b.Refresh() }
+func (b *IconButton) MouseMoved(*desktop.MouseEvent) {}
+func (b *IconButton) MouseOut()                      { b.hovered = false; b.Refresh() }
+
+type iconButtonRenderer struct {
+	btn *IconButton
+	bg  *canvas.Rectangle
+	img *canvas.Image
+}
+
+func (b *IconButton) CreateRenderer() fyne.WidgetRenderer {
+	bg := canvas.NewRectangle(color.Transparent)
+	bg.CornerRadius = 4
+	img := canvas.NewImageFromResource(b.Icon)
+	img.FillMode = canvas.ImageFillContain
+	return &iconButtonRenderer{btn: b, bg: bg, img: img}
+}
+
+func (r *iconButtonRenderer) Layout(size fyne.Size) {
+	r.bg.Resize(size)
+	pad := float32(3)
+	r.img.Move(fyne.NewPos(pad, pad))
+	r.img.Resize(fyne.NewSize(size.Width-2*pad, size.Height-2*pad))
+}
+
+func (r *iconButtonRenderer) MinSize() fyne.Size { return fyne.NewSize(22, 22) }
+
+func (r *iconButtonRenderer) Refresh() {
+	r.img.Resource = r.btn.Icon
+	switch {
+	case r.btn.Active && r.btn.hovered:
+		r.bg.FillColor = color.NRGBA{R: 0xe0, G: 0x45, B: 0x45, A: 0x99}
+	case r.btn.Active:
+		r.bg.FillColor = color.NRGBA{R: 0xcc, G: 0x30, B: 0x30, A: 0x66}
+	case r.btn.hovered:
+		r.bg.FillColor = color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0x18}
+	default:
+		r.bg.FillColor = color.Transparent
+	}
+	r.bg.Refresh()
+	r.img.Refresh()
+}
+
+func (r *iconButtonRenderer) Objects() []fyne.CanvasObject {
+	return []fyne.CanvasObject{r.bg, r.img}
+}
+
+func (r *iconButtonRenderer) Destroy() {}
 
 // Close click — fires when the mouse is released over the close icon area
 func (tb *TitleBar) MouseUp(ev *desktop.MouseEvent) {

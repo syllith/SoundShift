@@ -80,6 +80,7 @@ var (
 	procSetWindowCompositionAttr = windows.NewLazySystemDLL("user32.dll").NewProc("SetWindowCompositionAttribute")
 
 	user32dll                    = windows.MustLoadDLL("user32.dll")
+	gdi32dll                     = windows.MustLoadDLL("gdi32.dll")
 	procEnumWindows              = user32dll.MustFindProc("EnumWindows")
 	procGetWindowThreadProcessId = user32dll.MustFindProc("GetWindowThreadProcessId")
 	procGetWindowTextW           = user32dll.MustFindProc("GetWindowTextW")
@@ -100,6 +101,10 @@ var (
 	procSystemParametersInfoW    = user32dll.MustFindProc("SystemParametersInfoW")
 	procMonitorFromRect          = user32dll.MustFindProc("MonitorFromRect")
 	procGetMonitorInfoW          = user32dll.MustFindProc("GetMonitorInfoW")
+	procGetForegroundWindow      = user32dll.MustFindProc("GetForegroundWindow")
+	procSetWindowRgn             = user32dll.MustFindProc("SetWindowRgn")
+	procCreateRoundRectRgn       = gdi32dll.MustFindProc("CreateRoundRectRgn")
+	procDwmSetWindowAttribute    = windows.NewLazySystemDLL("dwmapi.dll").NewProc("DwmSetWindowAttribute")
 )
 
 // . IntToUintptr converts an integer to uintptr, needed for negative constants in Windows API calls
@@ -281,6 +286,12 @@ func IsWindowVisible(hwnd windows.HWND) bool {
 	return ret != 0
 }
 
+// . GetForegroundWindow returns the handle of the window currently in the foreground
+func GetForegroundWindow() windows.HWND {
+	ret, _, _ := procGetForegroundWindow.Call()
+	return windows.HWND(ret)
+}
+
 // . SetTopmost sets the specified window to be always on top (topmost)
 func SetTopmost(hwnd windows.HWND) {
 	procSetWindowPos.Call(uintptr(hwnd), IntToUintptr(-1), 0, 0, 0, 0, SWP_NOSIZE|SWP_NOMOVE)
@@ -330,4 +341,42 @@ func EnableAcrylic(hwnd windows.HWND) {
 		CbData: unsafe.Sizeof(accent),
 	}
 	procSetWindowCompositionAttr.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&data)))
+}
+
+// . SetRoundedCorners applies rounded corners to the window.
+// First tries the modern DwmSetWindowAttribute API (Windows 11+),
+// then falls back to SetWindowRgn for older Windows versions.
+func SetRoundedCorners(hwnd windows.HWND, radiusPx int) {
+	// Try modern Windows 11 API first: DwmSetWindowAttribute with DWMWA_WINDOW_CORNER_PREFERENCE
+	// DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWCP_ROUND = 2
+	const dwmwaWindowCornerPreference = 33
+	const dwmwcpRound = 2
+
+	cornerPref := int32(dwmwcpRound)
+	ret, _, _ := procDwmSetWindowAttribute.Call(
+		uintptr(hwnd),
+		uintptr(dwmwaWindowCornerPreference),
+		uintptr(unsafe.Pointer(&cornerPref)),
+		uintptr(unsafe.Sizeof(cornerPref)),
+	)
+	// If DwmSetWindowAttribute succeeds (on Windows 11+), we're done.
+	if ret != 0 {
+		return
+	}
+
+	// Fall back to SetWindowRgn for older Windows versions (Windows 10, etc.)
+	w, h, err := GetWindowSize(hwnd)
+	if err != nil || w <= 0 || h <= 0 {
+		return
+	}
+	// CreateRoundRectRgn(left, top, right, bottom, widthEllipse, heightEllipse)
+	hrgn, _, _ := procCreateRoundRectRgn.Call(
+		0, 0, uintptr(w), uintptr(h),
+		uintptr(radiusPx*2), uintptr(radiusPx*2),
+	)
+	if hrgn != 0 {
+		// bRedraw = 1 → repaint immediately
+		procSetWindowRgn.Call(uintptr(hwnd), hrgn, 1)
+		// Windows takes ownership of hrgn — do NOT DeleteObject.
+	}
 }
