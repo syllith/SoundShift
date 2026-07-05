@@ -68,8 +68,8 @@ func SetDefaultEndPoint(deviceId string) error {
 	}
 	defer pcv.Release() // Ensure the COM object is released after usage
 
-	//* Set the specified device as the default endpoint for both multimedia and communication roles
-	roles := []wca.ERole{wca.EMultimedia, wca.ECommunications}
+	//* Set the specified device as the default endpoint for console, multimedia, and communication roles
+	roles := []wca.ERole{wca.EConsole, wca.EMultimedia, wca.ECommunications}
 	for _, role := range roles {
 		if err := pcv.SetDefaultEndpoint(deviceId, role); err != nil {
 			//! Return an error if setting the default endpoint fails for any role

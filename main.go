@@ -10,6 +10,7 @@ import (
 	"image/png"
 	"math"
 	"os"
+	"regexp"
 	"runtime"
 	"soundshift/file"
 	"soundshift/fyneCustom"
@@ -77,6 +78,16 @@ var placementAreaSet bool
 // Rule: never hold mu while calling fyne.Do.
 var mu sync.Mutex
 
+// . Slide animation state: slideGen invalidates any in-flight animation when a
+// new show/hide starts; hiding guards against overlapping slide-out sequences.
+var slideGen atomic.Int64
+var hiding atomic.Bool
+
+// . Last window rect requested via positionWindow (physical px). Used to
+// detect when something else (e.g. Fyne scale re-detection on first show)
+// moved or resized the window behind our back.
+var targetX, targetY, targetW, targetH atomic.Int32
+
 // . singleInstanceMu holds the Windows named mutex for single-instance enforcement
 var singleInstanceMu windows.Handle
 
@@ -134,38 +145,170 @@ func waitForHWNDByTitle(pid uint32, title string, timeout time.Duration) (window
 }
 
 func hideMainWindow() {
-	if hwnd != 0 {
-		// Only record the hide timestamp when actually hiding a visible window,
-		// so the debounce in toggleWindow doesn't suppress a legitimate show.
-		if winapi.IsWindowVisible(hwnd) {
-			lastHideTime.Store(time.Now().UnixNano())
+	if hwnd == 0 || !winapi.IsWindowVisible(hwnd) {
+		if hwnd != 0 {
+			winapi.HideWindow(hwnd)
+		}
+		fyne.Do(func() {
+			Win.Hide()
+		})
+		return
+	}
+
+	// Only record the hide timestamp when actually hiding a visible window,
+	// so the debounce in toggleWindow doesn't suppress a legitimate show.
+	lastHideTime.Store(time.Now().UnixNano())
+
+	// One slide-out at a time; a second hide request just lets the first finish.
+	if !hiding.CompareAndSwap(false, true) {
+		return
+	}
+	gen := slideGen.Add(1) // cancel any in-flight slide-in
+	go func() {
+		defer hiding.Store(false)
+		const dropOffset = 24
+		if x, y, err := winapi.GetWindowPosition(hwnd); err == nil {
+			animateWindowY(x, y, y+dropOffset, 160*time.Millisecond, gen, easeInBack)
 		}
 		winapi.HideWindow(hwnd)
-	}
-	fyne.Do(func() {
-		Win.Hide()
-	})
+		fyne.Do(func() {
+			Win.Hide()
+		})
+	}()
 }
 
 func showMainWindow() {
-	// Scroll to top unless the user opted to remember scroll position.
-	if !settings.RememberScrollPosition {
-		fyne.Do(func() {
-			mainView.ScrollToTop()
-		})
+	if hwnd == 0 {
+		return
 	}
-	if hwnd != 0 {
-		winapi.ShowWindow(hwnd)
-		winapi.SetTopmost(hwnd)
-		// Apply rounded corners after showing the window
-		winapi.SetRoundedCorners(hwnd, 20)
-	}
+
+	// Use the cached background session snapshot for an instant refresh on window show.
+	// If background polling hasn't run yet, fall back to a live fetch.
+	cachedSessionsMu.Lock()
+	snapshot := cachedSessions
+	cachedSessionsMu.Unlock()
+	sessionsDirty.Store(false)
+
+	// Refresh all content, scroll state, size and position while the window is
+	// still hidden, so the first visible frame is already in its final state.
+	// Doing any of this after the native show is what caused the visible
+	// resize/relayout flicker on open.
 	done := make(chan struct{})
 	fyne.Do(func() {
-		Win.Show()
+		if len(snapshot) > 0 {
+			refreshMixerWithSessions(snapshot)
+		} else {
+			refreshMixer()
+		}
+		if !settings.RememberScrollPosition {
+			mainView.ScrollToTop()
+		}
+		resizeOnUI()
 		close(done)
 	})
 	<-done
+
+	// Still hidden: verify the OS honored the requested rect. On the very
+	// first show after startup the window can lag behind (styles, DPI, and
+	// Fyne state are still settling), so run one extra pass if it drifted.
+	if windowDrifted() {
+		resize()
+	}
+
+	// Read the settled position, then shift the window slightly down so it can
+	// spring up into place once visible.
+	const slideOffset = 24
+	finalX, finalY, posErr := winapi.GetWindowPosition(hwnd)
+	if posErr == nil {
+		winapi.SetWindowPosNoSize(hwnd, finalX, finalY+slideOffset)
+	}
+
+	gen := slideGen.Add(1)
+
+	winapi.ShowWindow(hwnd)
+	winapi.SetTopmost(hwnd)
+	winapi.SetRoundedCorners(hwnd, 20)
+
+	shown := make(chan struct{})
+	fyne.Do(func() {
+		Win.Show()
+		// Fyne re-applies its remembered position when a window is re-shown,
+		// which on the first open can undo the slide offset (and killed the
+		// spring effect). Re-assert the offset after Show so the first
+		// painted frame starts the animation from the right place.
+		if posErr == nil {
+			winapi.SetWindowPosNoSize(hwnd, finalX, finalY+slideOffset)
+		}
+		close(shown)
+	})
+	<-shown
+
+	if posErr == nil {
+		if animateWindowY(finalX, finalY+slideOffset, finalY, 200*time.Millisecond, gen, easeOutBack) {
+			// Land exactly on the final position (the overshoot curve ends near,
+			// but not precisely at, the target).
+			winapi.SetWindowPosNoSize(hwnd, finalX, finalY)
+		}
+	}
+}
+
+// . windowDrifted reports whether the window's actual rect differs from the
+// last rect requested via positionWindow.
+func windowDrifted() bool {
+	if hwnd == 0 {
+		return false
+	}
+	w, h, err := winapi.GetWindowSize(hwnd)
+	if err != nil {
+		return false
+	}
+	x, y, err := winapi.GetWindowPosition(hwnd)
+	if err != nil {
+		return false
+	}
+	return w != targetW.Load() || h != targetH.Load() ||
+		x != targetX.Load() || y != targetY.Load()
+}
+
+// . easeOutBack decelerates with a slight overshoot past the target (spring landing).
+func easeOutBack(t float64) float64 {
+	const c1 = 1.70158
+	const c3 = c1 + 1
+	p := t - 1
+	return 1 + c3*p*p*p + c1*p*p
+}
+
+// . easeInBack pulls back slightly, then accelerates away (reverse spring).
+func easeInBack(t float64) float64 {
+	const c1 = 1.70158
+	const c3 = c1 + 1
+	return c3*t*t*t - c1*t*t
+}
+
+// . animateWindowY animates the window's Y position from fromY to toY over
+// duration. Frames are paced by DwmFlush, which blocks until the next DWM
+// composition pass, so exactly one position update lands per composed frame —
+// a blind sleep loop produced uneven frame deltas that read as chop. Position-
+// only moves are cheap under DWM (unlike resizes), so this stays smooth even
+// with acrylic. Runs synchronously; must be called off the Fyne goroutine.
+// Returns false if cancelled by a newer show/hide (slideGen) or the window
+// becoming hidden mid-animation.
+func animateWindowY(x, fromY, toY int32, duration time.Duration, gen int64, ease func(float64) float64) bool {
+	start := time.Now()
+	for {
+		t := float64(time.Since(start)) / float64(duration)
+		if t >= 1 {
+			return slideGen.Load() == gen
+		}
+		if slideGen.Load() != gen || !winapi.IsWindowVisible(hwnd) {
+			return false
+		}
+		y := float64(fromY) + ease(t)*float64(toY-fromY)
+		winapi.SetWindowPosNoSize(hwnd, x, int32(math.Round(y)))
+		if !winapi.DwmFlush() {
+			time.Sleep(8 * time.Millisecond) // fallback pacing if DWM is unavailable
+		}
+	}
 }
 
 // . toggleWindow toggles the main window visibility
@@ -189,18 +332,24 @@ func toggleWindow() {
 		general.LogError("TOGGLE_SHOW", nil)
 		setPlacementAreaForCursor()
 
-		// Position the window before showing it to minimize flicker
-		resize()
+		// showMainWindow refreshes content and settles size/position while the
+		// window is still hidden, so no pre-show resize pass is needed here.
 		showMainWindow()
 
-		// Run several correction passes to handle late size adjustments on first show.
+		// Drift watchdog: on the first show after startup, Fyne can re-apply a
+		// stale size/position or re-detect the canvas scale and grow the
+		// window after it is visible. Only correct when the window actually
+		// drifted from the requested rect, so normal opens get zero post-show
+		// repositioning. First check lands after the slide-in (~200ms).
 		go func() {
-			for _, delay := range []time.Duration{0, 30 * time.Millisecond, 80 * time.Millisecond, 160 * time.Millisecond, 280 * time.Millisecond} {
+			for _, delay := range []time.Duration{250 * time.Millisecond, 350 * time.Millisecond, 600 * time.Millisecond} {
 				time.Sleep(delay)
-				if !winapi.IsWindowVisible(hwnd) {
+				if !winapi.IsWindowVisible(hwnd) || hiding.Load() {
 					return
 				}
-				resize()
+				if windowDrifted() {
+					resize()
+				}
 			}
 		}()
 	}
@@ -393,6 +542,10 @@ func positionWindow(physW, physH int32) {
 		physW,
 		physH,
 	)
+	targetX.Store(int32(x))
+	targetY.Store(int32(y))
+	targetW.Store(physW)
+	targetH.Store(physH)
 	winapi.SetRoundedCorners(hwnd, 20)
 }
 
@@ -493,57 +646,57 @@ func main() {
 		configWindowOpen.Store(false)
 	})
 
-	//* Show the main window initially to get the window handle
-	Win.Show()
+	//* Window setup runs in the background, AFTER ShowAndRun below has shown
+	//* the window (the handle only exists once the window is visible). The
+	//* old flow hid the window before ShowAndRun, which promptly re-showed it
+	//* and left it visible on every startup; here the hide happens last, so
+	//* nothing re-shows the window afterwards.
+	withRecovery("windowSetup", func() {
+		h, err := waitForHWNDByTitle(pid, title, 5*time.Second)
+		if err == nil {
+			//* Hide natively first so the startup flash is as short as possible
+			winapi.HideWindow(h)
+			hwnd = h
+			fyne.Do(func() {
+				Win.Hide()
+			})
 
-	//* Wait for a valid window handle with timeout
-	h, err := waitForHWNDByTitle(pid, title, 5*time.Second)
-	if err != nil {
-		general.LogError("Failed to acquire HWND", err)
-		return
-	}
-	hwnd = h
-
-	//* Apply Windows API settings to the application window
-	winapi.HideTitleBar(hwnd) // remove native chrome before resize so MinSize is correct
-	resize()
-	winapi.HideWindow(hwnd)
-	done := make(chan struct{})
-	fyne.Do(func() {
-		Win.Hide()
-		close(done)
-	})
-	<-done
-	winapi.HideMinMaxButtons(hwnd)
-	winapi.HideWindowFromTaskbar(hwnd)
-	winapi.SetTopmost(hwnd)
-	winapi.EnableAcrylic(hwnd)
-
-	// Pre-settle placement while hidden so the very first user-visible show opens correctly.
-	go func() {
-		for _, delay := range []time.Duration{40 * time.Millisecond, 120 * time.Millisecond, 250 * time.Millisecond, 450 * time.Millisecond} {
-			time.Sleep(delay)
-			if hwnd == 0 {
-				return
-			}
+			//* Apply Windows API settings while the window is hidden
+			winapi.HideTitleBar(hwnd) // remove native chrome before resize so MinSize is correct
+			winapi.HideMinMaxButtons(hwnd)
+			winapi.HideWindowFromTaskbar(hwnd)
+			winapi.SetTopmost(hwnd)
+			winapi.EnableAcrylic(hwnd)
 			resize()
+
+			// Pre-settle placement while hidden so the very first user-visible show opens correctly.
+			withRecovery("preSettle", func() {
+				for _, delay := range []time.Duration{40 * time.Millisecond, 120 * time.Millisecond, 250 * time.Millisecond, 450 * time.Millisecond} {
+					time.Sleep(delay)
+					resize()
+				}
+			})
+		} else {
+			// Continue anyway so the tray still starts and the user can exit.
+			general.LogError("Failed to acquire HWND", err)
 		}
-	}()
 
-	//* Start systray on a locked OS thread
-	go func() {
-		runtime.LockOSThread()
-		systray.Run(initTray, func() {})
-	}()
+		//* Start systray on a locked OS thread
+		go func() {
+			runtime.LockOSThread()
+			systray.Run(initTray, func() {})
+		}()
 
-	//* Start background goroutines — wrapped in recovery so a panic logs and exits cleanly
-	withRecovery("hideOnClick", hideOnClick)
-	withRecovery("monitorFocusLoss", monitorFocusLoss)
-	withRecovery("updateDevices", updateDevices)
-	withRecovery("monitorDeviceChanges", monitorDeviceChanges)
-	withRecovery("monitorMixer", monitorMixer)
+		//* Start background goroutines — launched after hwnd is set so none of
+		//* them ever observe a half-initialized handle
+		withRecovery("hideOnClick", hideOnClick)
+		withRecovery("monitorFocusLoss", monitorFocusLoss)
+		withRecovery("updateDevices", updateDevices)
+		withRecovery("monitorDeviceChanges", monitorDeviceChanges)
+		withRecovery("monitorMixer", monitorMixer)
+	})
 
-	//* Run the application event loop
+	//* Run the application event loop (this performs the one and only startup show)
 	Win.ShowAndRun()
 }
 
@@ -780,12 +933,6 @@ func loadSettings() {
 		newSettings.HiddenApps = make(map[string]bool)
 	}
 
-	//* Build a map linking original device names to their IDs for device ID consistency
-	originalNameToConfig := make(map[string]string)
-	for id, config := range newSettings.DeviceNames {
-		originalNameToConfig[config.OriginalName] = id
-	}
-
 	//* Retrieve the list of currently connected audio devices
 	currentDevices, err := mmDeviceEnumerator.GetDevices()
 	if err != nil {
@@ -794,35 +941,59 @@ func loadSettings() {
 		return
 	}
 
-	//* Temporary map to store updated device configurations
-	updatedDeviceNames := make(map[string]DeviceConfig)
-
-	//* Update settings for each detected device, preserving configurations when possible
+	//* Track which saved IDs are currently active so name-based ID migration
+	//* never steals the config of a device that is still connected
+	activeIDs := make(map[string]bool, len(currentDevices))
 	for _, device := range currentDevices {
-		config, exists := newSettings.DeviceNames[device.Id]
-		if !exists {
-			if oldID, found := originalNameToConfig[device.Name]; found {
-				config = newSettings.DeviceNames[oldID]
-				updatedDeviceNames[device.Id] = config
-				delete(newSettings.DeviceNames, oldID)
-				fmt.Printf("Updated device ID for %s from %s to %s\n", device.Name, oldID, device.Id)
-			} else {
-				config = DeviceConfig{
-					Name:         device.Name,
-					IsShown:      true,
-					OriginalName: device.Name,
-				}
-				updatedDeviceNames[device.Id] = config
-			}
-		} else {
-			updatedDeviceNames[device.Id] = config
+		activeIDs[device.Id] = true
+	}
+
+	//* Map normalized original names to saved IDs of devices that are NOT
+	//* currently active — these are migration candidates for when Windows
+	//* regenerates an endpoint GUID (e.g. after a GPU/audio driver reinstall)
+	nameToStaleID := make(map[string]string)
+	for id, config := range newSettings.DeviceNames {
+		if key := normalizeDeviceName(config.OriginalName); key != "" && !activeIDs[id] {
+			nameToStaleID[key] = id
 		}
 	}
 
-	newSettings.DeviceNames = updatedDeviceNames
+	//* Merge current devices into the saved settings. Entries for devices that
+	//* are disconnected right now are deliberately preserved, so a hidden
+	//* device stays hidden when it comes back (monitor sleep, unplug, etc.)
+	for _, device := range currentDevices {
+		if _, exists := newSettings.DeviceNames[device.Id]; exists {
+			continue
+		}
+		nameKey := normalizeDeviceName(device.Name)
+		if oldID, found := nameToStaleID[nameKey]; found {
+			config := newSettings.DeviceNames[oldID]
+			config.OriginalName = device.Name
+			newSettings.DeviceNames[device.Id] = config
+			delete(newSettings.DeviceNames, oldID)
+			delete(nameToStaleID, nameKey) // each stale entry migrates at most once
+			general.LogError(fmt.Sprintf("Migrated device ID for %s from %s to %s", device.Name, oldID, device.Id), nil)
+		} else {
+			newSettings.DeviceNames[device.Id] = DeviceConfig{
+				Name:         device.Name,
+				IsShown:      true,
+				OriginalName: device.Name,
+			}
+		}
+	}
 
 	//* Commit the fully built settings atomically
 	settings = newSettings
+}
+
+// . reEnumPrefix matches the "N- " prefix Windows inserts into device names on
+// re-enumeration, e.g. "Speakers (2- USB Audio Device)"
+var reEnumPrefix = regexp.MustCompile(`\(\d+- `)
+
+// . normalizeDeviceName canonicalizes a device friendly name for matching:
+// case-insensitive, whitespace-trimmed, with re-enumeration prefixes removed
+func normalizeDeviceName(name string) string {
+	return strings.ToLower(strings.TrimSpace(reEnumPrefix.ReplaceAllString(name, "(")))
 }
 
 // . saveSettings saves the current settings to a JSON file in the user's roaming directory
@@ -938,13 +1109,8 @@ func genConfigForm() fyne.CanvasObject {
 		}
 	}
 	hiddenAppsBox := container.NewVBox()
-	if len(hiddenAppEntries) > 0 {
-		hiddenAppsLabel := canvas.NewText("Hide from mixer:", color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xb0})
-		hiddenAppsLabel.TextSize = 12
-		hiddenAppsBox.Add(hiddenAppsLabel)
-		for _, entry := range hiddenAppEntries {
-			hiddenAppsBox.Add(entry.checkbox)
-		}
+	for _, entry := range hiddenAppEntries {
+		hiddenAppsBox.Add(entry.checkbox)
 	}
 
 	//* Save button to apply and persist settings
@@ -1014,14 +1180,31 @@ func genConfigForm() fyne.CanvasObject {
 	saveButtonContainer := container.New(layout.NewCenterLayout(), saveButton)
 	checkboxAndButtonVBox := container.NewVBox(hideAfterSelectionCheckbox, rememberScrollCheckbox, startWithWindowsCheckbox)
 	if len(hiddenAppEntries) > 0 {
+		hiddenAppsLabel := canvas.NewText("Hide from mixer:", color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xb0})
+		hiddenAppsLabel.TextSize = 12
 		checkboxAndButtonVBox.Add(widget.NewSeparator())
-		checkboxAndButtonVBox.Add(hiddenAppsBox)
+		checkboxAndButtonVBox.Add(hiddenAppsLabel)
+
+		//* Cap the app list height; anything beyond scrolls. The label stays
+		//* fixed above the scroll region.
+		const maxHiddenAppsHeight float32 = 160
+		appsScroll := container.NewVScroll(hiddenAppsBox)
+		appsSize := hiddenAppsBox.MinSize()
+		if appsSize.Height > maxHiddenAppsHeight {
+			appsSize.Height = maxHiddenAppsHeight
+		}
+		appsScroll.SetMinSize(appsSize)
+		checkboxAndButtonVBox.Add(appsScroll)
 	}
 	checkboxAndButtonVBox.Add(saveButtonContainer)
 	centeredCheckboxAndButtonContainer := container.New(layout.NewCenterLayout(), checkboxAndButtonVBox)
 
+	//* Device form scrolls in the remaining space above the fixed bottom
+	//* section, so a long device list can never push the settings offscreen.
+	deviceScroll := container.NewVScroll(form)
+
 	//* Create a padded border container for the form and additional settings
-	borderContainer := container.NewPadded(container.NewBorder(form, centeredCheckboxAndButtonContainer, nil, nil, nil))
+	borderContainer := container.NewPadded(container.NewBorder(nil, centeredCheckboxAndButtonContainer, nil, nil, deviceScroll))
 	return borderContainer
 }
 
@@ -1297,8 +1480,9 @@ func createDeviceButtonHandler(deviceID string) func() {
 			time.Sleep(200 * time.Millisecond)
 			newDevices, err := mmDeviceEnumerator.GetDevices()
 			if err == nil && newDevices != nil {
+				valid := filterValidDevices(newDevices)
 				mu.Lock()
-				audioDevices = newDevices
+				audioDevices = valid
 				mu.Unlock()
 				fyne.Do(func() {
 					renderButtons()
@@ -1473,7 +1657,7 @@ func doExtractIcon(exePath string) fyne.Resource {
 	return fyne.NewStaticResource(exePath, buf.Bytes())
 }
 
-// . refreshMixer rebuilds the per-app volume mixer UI from current audio sessions.
+// . refreshMixer fetches current audio sessions and rebuilds the mixer UI.
 // Must be called on the Fyne goroutine.
 func refreshMixer() {
 	sessions, err := policyConfig.GetAudioSessions()
@@ -1482,7 +1666,12 @@ func refreshMixer() {
 		mixerSection.Refresh()
 		return
 	}
+	refreshMixerWithSessions(sessions)
+}
 
+// . refreshMixerWithSessions rebuilds the per-app volume mixer UI from the
+// supplied session slice. Must be called on the Fyne goroutine.
+func refreshMixerWithSessions(sessions []policyConfig.AudioSession) {
 	if len(sessions) == 0 {
 		mixerSection.Objects = nil
 		mixerSection.Refresh()
@@ -1491,7 +1680,7 @@ func refreshMixer() {
 
 	// Filter out apps the user has hidden via settings.
 	if len(settings.HiddenApps) > 0 {
-		filtered := sessions[:0]
+		filtered := make([]policyConfig.AudioSession, 0, len(sessions))
 		for _, s := range sessions {
 			key := strings.ToLower(s.Name)
 			if !settings.HiddenApps[key] {
@@ -1535,11 +1724,13 @@ func refreshMixer() {
 		mixerSliders = make([]*fyneCustom.ScrollableSlider, len(sessions))
 		mixerMuteButtons = make([]*fyneCustom.IconButton, len(sessions))
 		mixerMuted = make([]bool, len(sessions))
+		mixerMuteTapped = make([]time.Time, len(sessions))
 
 		newMixer := container.NewVBox()
 
 		for i, sess := range sessions {
-			sessIdx := sess.SessionIdx
+			sessPID := sess.PID
+			sessIsSys := sess.IsSystem
 			sessI := i
 			displayName := general.EllipticalTruncate(sess.Name, 24)
 
@@ -1567,9 +1758,10 @@ func refreshMixer() {
 				newMuted := !mixerMuted[sessI]
 				// Optimistic UI update — instant feedback before COM call completes
 				mixerMuted[sessI] = newMuted
+				mixerMuteTapped[sessI] = time.Now()
 				muteBtn.SetActive(newMuted)
 				go func() {
-					if err := policyConfig.SetSessionMute(sessIdx, newMuted); err != nil {
+					if err := policyConfig.SetSessionMuteByPID(sessPID, sessIsSys, newMuted); err != nil {
 						general.LogError("Error setting session mute", err)
 					}
 				}()
@@ -1583,7 +1775,7 @@ func refreshMixer() {
 			slider.OnChanged = func(f float64) {
 				level := float32(f / 100.0)
 				go func() {
-					if err := policyConfig.SetSessionVolume(sessIdx, level); err != nil {
+					if err := policyConfig.SetSessionVolumeByPID(sessPID, sessIsSys, level); err != nil {
 						general.LogError("Error setting session volume", err)
 					}
 				}()
@@ -1605,31 +1797,25 @@ func refreshMixer() {
 		mixerSection.Objects = []fyne.CanvasObject{newMixer}
 		mixerSection.Refresh()
 
-		// Reposition the window after Fyne has had time to lay out the new
-		// mixer content. An immediate call would use stale dimensions; the
-		// delayed passes let Fyne settle first.
-		go func() {
-			for _, delay := range []time.Duration{50 * time.Millisecond, 150 * time.Millisecond, 300 * time.Millisecond} {
-				time.Sleep(delay)
-				if !winapi.IsWindowVisible(hwnd) {
-					return
-				}
-				fyne.Do(func() {
-					resizeOnUI()
-				})
-			}
-		}()
+		// No reposition passes needed here: the window is sized from topSection
+		// only (the mixer lives below it behind the scroll), so mixer content
+		// changes never alter the target window size. The old delayed passes
+		// caused visible repositioning after show and fought the slide-in
+		// animation.
 	} else {
 		// Sessions haven't changed — just update slider values and mute state in-place.
 		for i, sess := range sessions {
 			if i >= len(mixerSliders) || mixerSliders[i] == nil {
 				continue
 			}
-			// Sync mute button active state if changed externally.
+			// Sync mute button active state if changed externally, but do not override
+			// a recent user tap that is still being processed.
 			if i < len(mixerMuted) && i < len(mixerMuteButtons) && mixerMuteButtons[i] != nil {
 				if sess.Muted != mixerMuted[i] {
-					mixerMuted[i] = sess.Muted
-					mixerMuteButtons[i].SetActive(sess.Muted)
+					if time.Since(mixerMuteTapped[i]) > 1500*time.Millisecond {
+						mixerMuted[i] = sess.Muted
+						mixerMuteButtons[i].SetActive(sess.Muted)
+					}
 				}
 			}
 			// Don't override the slider while the user is dragging it.
@@ -1660,20 +1846,67 @@ var mixerSessionKeys []struct {
 var mixerSliders []*fyneCustom.ScrollableSlider
 var mixerMuteButtons []*fyneCustom.IconButton
 var mixerMuted []bool
+var mixerMuteTapped []time.Time
 
-// . monitorMixer periodically refreshes the per-app mixer UI and updates slider
-// values to reflect external volume changes.
+// cachedSessions holds the latest session snapshot from background polling.
+var (
+	cachedSessions   []policyConfig.AudioSession
+	cachedSessionsMu sync.Mutex
+	sessionsDirty    atomic.Bool
+)
+
+// . monitorMixer periodically polls audio sessions and dispatches UI updates.
+// COM enumeration runs on this dedicated OS thread (not on Fyne's thread) for
+// reliability. Uses adaptive intervals: 500ms when visible, 2s when hidden.
 func monitorMixer() {
-	ticker := time.NewTicker(1 * time.Second)
+	// Lock this goroutine to a single OS thread and initialise COM on it.
+	// Without this, Go's scheduler can migrate the goroutine mid-COM-call,
+	// causing silent failures or stale data.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	ole.CoInitializeEx(0, ole.COINIT_MULTITHREADED)
+	defer ole.CoUninitialize()
+
+	const visibleInterval = 500 * time.Millisecond
+	const hiddenInterval = 2 * time.Second
+
+	ticker := time.NewTicker(hiddenInterval)
 	defer ticker.Stop()
+	currentInterval := hiddenInterval
 
 	for range ticker.C {
-		if !winapi.IsWindowVisible(hwnd) {
+		visible := winapi.IsWindowVisible(hwnd)
+
+		// Adjust tick rate based on window visibility.
+		desired := hiddenInterval
+		if visible {
+			desired = visibleInterval
+		}
+		if desired != currentInterval {
+			ticker.Reset(desired)
+			currentInterval = desired
+		}
+
+		// Fetch sessions on this goroutine (off the Fyne UI thread).
+		sessions, err := policyConfig.GetAudioSessions()
+		if err != nil {
 			continue
 		}
 
-		fyne.Do(func() {
-			refreshMixer()
-		})
+		// Cache the latest snapshot so showMainWindow can use it immediately.
+		cachedSessionsMu.Lock()
+		cachedSessions = sessions
+		cachedSessionsMu.Unlock()
+
+		if visible {
+			sessionsDirty.Store(false)
+			sessCopy := sessions // capture for closure
+			fyne.Do(func() {
+				refreshMixerWithSessions(sessCopy)
+			})
+		} else {
+			// Mark dirty so the next window-show picks up changes instantly.
+			sessionsDirty.Store(true)
+		}
 	}
 }

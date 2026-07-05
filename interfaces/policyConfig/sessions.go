@@ -82,9 +82,11 @@ func GetAudioSessions() ([]AudioSession, error) {
 			continue
 		}
 
-		// Check session state – only include active sessions (state == 1).
+		// Check session state – include active (1) and inactive (0) sessions.
+		// Only skip expired sessions (state == 2) which have been disconnected.
+		// This matches Windows Volume Mixer behaviour: paused apps stay visible.
 		var state uint32
-		if err := ctrl.GetState(&state); err != nil || state != 1 {
+		if err := ctrl.GetState(&state); err != nil || state == 2 {
 			vol.Release()
 			ctrl2.Release()
 			ctrl.Release()
@@ -134,6 +136,89 @@ func GetAudioSessions() ([]AudioSession, error) {
 	}
 
 	return sessions, nil
+}
+
+// forEachSessionVolume invokes fn on the ISimpleAudioVolume of every session
+// on the default render device that matches pid/isSystem.
+func forEachSessionVolume(pid uint32, isSystem bool, fn func(*wca.ISimpleAudioVolume) error) error {
+	var deviceEnumerator *wca.IMMDeviceEnumerator
+	if err := wca.CoCreateInstance(
+		wca.CLSID_MMDeviceEnumerator, 0, wca.CLSCTX_ALL,
+		wca.IID_IMMDeviceEnumerator, &deviceEnumerator,
+	); err != nil {
+		return err
+	}
+	defer deviceEnumerator.Release()
+
+	var defaultDevice *wca.IMMDevice
+	if err := deviceEnumerator.GetDefaultAudioEndpoint(wca.ERender, wca.EConsole, &defaultDevice); err != nil {
+		return err
+	}
+	defer defaultDevice.Release()
+
+	var sessionManager *wca.IAudioSessionManager2
+	if err := defaultDevice.Activate(wca.IID_IAudioSessionManager2, wca.CLSCTX_ALL, nil, &sessionManager); err != nil {
+		return err
+	}
+	defer sessionManager.Release()
+
+	var enumerator *wca.IAudioSessionEnumerator
+	if err := sessionManager.GetSessionEnumerator(&enumerator); err != nil {
+		return err
+	}
+	defer enumerator.Release()
+
+	var count int
+	if err := enumerator.GetCount(&count); err != nil {
+		return err
+	}
+
+	matched := false
+	for i := 0; i < count; i++ {
+		var ctrl *wca.IAudioSessionControl
+		if err := enumerator.GetSession(i, &ctrl); err != nil {
+			continue
+		}
+		var ctrl2 *wca.IAudioSessionControl2
+		if err := ctrl.PutQueryInterface(wca.IID_IAudioSessionControl2, &ctrl2); err != nil {
+			ctrl.Release()
+			continue
+		}
+
+		var sessPID uint32
+		_ = ctrl2.GetProcessId(&sessPID)
+		sessIsSystem := ctrl2.IsSystemSoundsSession() == nil
+
+		if sessPID == pid && sessIsSystem == isSystem {
+			var vol *wca.ISimpleAudioVolume
+			if err := ctrl.PutQueryInterface(wca.IID_ISimpleAudioVolume, &vol); err == nil {
+				matched = true
+				_ = fn(vol)
+				vol.Release()
+			}
+		}
+		ctrl2.Release()
+		ctrl.Release()
+	}
+
+	if !matched {
+		return fmt.Errorf("no audio session found for pid=%d isSystem=%v", pid, isSystem)
+	}
+	return nil
+}
+
+// SetSessionVolumeByPID sets the volume for all sessions belonging to a process.
+func SetSessionVolumeByPID(pid uint32, isSystem bool, level float32) error {
+	return forEachSessionVolume(pid, isSystem, func(v *wca.ISimpleAudioVolume) error {
+		return v.SetMasterVolume(level, nil)
+	})
+}
+
+// SetSessionMuteByPID sets the mute state for all sessions belonging to a process.
+func SetSessionMuteByPID(pid uint32, isSystem bool, muted bool) error {
+	return forEachSessionVolume(pid, isSystem, func(v *wca.ISimpleAudioVolume) error {
+		return v.SetMute(muted, nil)
+	})
 }
 
 // SetSessionVolume sets the volume for the audio session at the given enumerator index.

@@ -105,7 +105,9 @@ var (
 	procGetForegroundWindow      = user32dll.MustFindProc("GetForegroundWindow")
 	procSetWindowRgn             = user32dll.MustFindProc("SetWindowRgn")
 	procCreateRoundRectRgn       = gdi32dll.MustFindProc("CreateRoundRectRgn")
-	procDwmSetWindowAttribute    = windows.NewLazySystemDLL("dwmapi.dll").NewProc("DwmSetWindowAttribute")
+	dwmapiDLL                    = windows.NewLazySystemDLL("dwmapi.dll")
+	procDwmSetWindowAttribute    = dwmapiDLL.NewProc("DwmSetWindowAttribute")
+	procDwmFlush                 = dwmapiDLL.NewProc("DwmFlush")
 )
 
 // . IntToUintptr converts an integer to uintptr, needed for negative constants in Windows API calls
@@ -209,6 +211,20 @@ func PositionWindowOptimized(hwnd windows.HWND, x, y, width, height int32) {
 	// Use SWP_NOACTIVATE to prevent the window from being activated, which reduces flicker.
 	// SWP_NOZORDER maintains the z-order without unnecessary processing.
 	procSetWindowPos.Call(uintptr(hwnd), 0, uintptr(x), uintptr(y), uintptr(width), uintptr(height), SWP_NOACTIVATE|SWP_NOZORDER)
+}
+
+// . SetWindowPosNoSize moves the window without resizing, activating, or changing z-order.
+// Used for position-only animation frames.
+func SetWindowPosNoSize(hwnd windows.HWND, x, y int32) {
+	procSetWindowPos.Call(uintptr(hwnd), 0, uintptr(x), uintptr(y), 0, 0, SWP_NOSIZE|SWP_NOACTIVATE|SWP_NOZORDER)
+}
+
+// . DwmFlush blocks until the next DWM composition pass (vblank). Returns true
+// on success. Used to pace animation frames to the compositor so each
+// composed frame gets exactly one position update.
+func DwmFlush() bool {
+	ret, _, _ := procDwmFlush.Call()
+	return ret == 0 // S_OK
 }
 
 // . GetTaskbarHeight returns the current height of the Windows taskbar
@@ -336,12 +352,12 @@ func GetWindowSize(hwnd windows.HWND) (width, height int32, err error) {
 // . EnableAcrylic applies the Windows acrylic blur-behind effect to the window.
 // It uses SetWindowCompositionAttribute with ACCENT_ENABLE_ACRYLICBLURBEHIND so that
 // DWM composites a blurred + tinted version of the content behind the window.
-// GradientColor is 0xAABBGGRR: dark blue-gray (#202530) at 75% opacity.
+// GradientColor is 0xAABBGGRR: near-black blue-gray (#14161A) at 80% opacity.
 func EnableAcrylic(hwnd windows.HWND) {
 	accent := AccentPolicy{
 		AccentState:   ACCENT_ENABLE_ACRYLICBLURBEHIND,
 		AccentFlags:   0,
-		GradientColor: 0x80302520, // AABBGGRR: A=0xC0 B=0x30 G=0x25 R=0x20 → #202530 @ 75%
+		GradientColor: 0xCC1A1614, // AABBGGRR: A=0xCC B=0x1A G=0x16 R=0x14 → #14161A @ 80%
 		AnimationId:   0,
 	}
 	data := WindowCompositionAttribData{
@@ -368,8 +384,11 @@ func SetRoundedCorners(hwnd windows.HWND, radiusPx int) {
 		uintptr(unsafe.Pointer(&cornerPref)),
 		uintptr(unsafe.Sizeof(cornerPref)),
 	)
-	// If DwmSetWindowAttribute succeeds (on Windows 11+), we're done.
-	if ret != 0 {
+	// DwmSetWindowAttribute returns S_OK (0) on success (Windows 11+); only
+	// fall back to SetWindowRgn when it fails. Falling through on success
+	// forced a full repaint (SetWindowRgn with bRedraw=1) on every
+	// reposition, which was a major source of flicker on window show.
+	if ret == 0 {
 		return
 	}
 
